@@ -25,6 +25,10 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 - `POST /comms/summarize` — returns a summary and summary cards
 - `POST /comms/reply` — validates identifiers, returns confirmation
 - `POST /comms/compose` — validates recipients/subject, returns confirmation and stores the composed message in memory
+- Meeting stubs:
+  - `POST /comms/join_meeting` — returns join card
+  - `POST /comms/prepare_meeting` — returns prep/agenda card
+  - `POST /comms/debrief_meeting` — returns debrief/summary card
 
 ## Email adapters
 

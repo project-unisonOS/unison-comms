@@ -70,3 +70,18 @@ def test_unison_compose_and_check():
     resp2 = client.post("/comms/check", json={"person_id": "u2", "channel": "unison"})
     msgs = resp2.json()["messages"]
     assert any(m for m in msgs if m.get("message_id") == body["message_id"])
+
+
+def test_meeting_stubs_return_cards():
+    client = TestClient(app)
+    join = client.post("/comms/join_meeting", json={"person_id": "p1", "meeting_id": "m1", "join_url": "https://x"})
+    assert join.status_code == 200
+    assert join.json()["cards"][0]["origin_intent"] == "comms.join_meeting"
+
+    prep = client.post("/comms/prepare_meeting", json={"person_id": "p1", "meeting_id": "m1"})
+    assert prep.status_code == 200
+    assert prep.json()["cards"][0]["origin_intent"] == "comms.prepare_meeting"
+
+    debrief = client.post("/comms/debrief_meeting", json={"person_id": "p1", "meeting_id": "m1"})
+    assert debrief.status_code == 200
+    assert debrief.json()["cards"][0]["origin_intent"] == "comms.debrief_meeting"

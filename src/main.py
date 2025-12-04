@@ -532,6 +532,57 @@ def comms_compose(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     }
 
 
+@app.post("/comms/join_meeting")
+def comms_join_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Stub meeting join endpoint; returns a card with join link/info."""
+    person_id = body.get("person_id") or "local-user"
+    meeting_id = body.get("meeting_id") or "meeting-1"
+    join_url = body.get("join_url") or "https://example.com/meeting"
+    card = {
+        "id": f"meeting-{meeting_id}",
+        "type": "summary",
+        "title": f"Join meeting {meeting_id}",
+        "body": f"Join link: {join_url}",
+        "tags": ["comms", "meeting"],
+        "origin_intent": "comms.join_meeting",
+    }
+    return {"ok": True, "person_id": person_id, "meeting_id": meeting_id, "cards": [card]}
+
+
+@app.post("/comms/prepare_meeting")
+def comms_prepare_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Stub meeting prep; returns agenda/participants cards."""
+    person_id = body.get("person_id") or "local-user"
+    meeting_id = body.get("meeting_id") or "meeting-1"
+    agenda = body.get("agenda") or ["Review updates", "Decide next steps"]
+    card = {
+        "id": f"meeting-prep-{meeting_id}",
+        "type": "guide",
+        "title": f"Meeting prep: {meeting_id}",
+        "steps": agenda,
+        "tags": ["comms", "meeting", "prep"],
+        "origin_intent": "comms.prepare_meeting",
+    }
+    return {"ok": True, "person_id": person_id, "meeting_id": meeting_id, "cards": [card]}
+
+
+@app.post("/comms/debrief_meeting")
+def comms_debrief_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    """Stub meeting debrief; returns summary card."""
+    person_id = body.get("person_id") or "local-user"
+    meeting_id = body.get("meeting_id") or "meeting-1"
+    summary = body.get("summary") or "Decisions: TBD. Follow-ups: TBD."
+    card = {
+        "id": f"meeting-debrief-{meeting_id}",
+        "type": "summary",
+        "title": f"Meeting debrief: {meeting_id}",
+        "body": summary,
+        "tags": ["comms", "meeting", "debrief"],
+        "origin_intent": "comms.debrief_meeting",
+    }
+    return {"ok": True, "person_id": person_id, "meeting_id": meeting_id, "summary": summary, "cards": [card]}
+
+
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
