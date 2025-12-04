@@ -3,6 +3,9 @@ import time
 import imaplib
 import smtplib
 import email
+import json
+from pathlib import Path
+from base64 import urlsafe_b64decode
 from email.message import EmailMessage
 from email.header import decode_header
 from email.utils import parseaddr
@@ -30,6 +33,40 @@ def _priority_tag(subject: str) -> str:
     if "important" in sub:
         return "p1"
     return "p2"
+
+
+def _load_key(raw: Optional[str]) -> Optional[bytes]:
+    if not raw:
+        return None
+    try:
+        return urlsafe_b64decode(raw)
+    except Exception:
+        return None
+
+
+def _encrypt_blob(data: Any, key: Optional[bytes]) -> str:
+    if not key:
+        return json.dumps(data)
+    try:
+        from cryptography.fernet import Fernet
+
+        f = Fernet(key)
+        return f.encrypt(json.dumps(data).encode("utf-8")).decode("utf-8")
+    except Exception:
+        return json.dumps(data)
+
+
+def _decrypt_blob(ciphertext: str, key: Optional[bytes]) -> Any:
+    if not key:
+        return json.loads(ciphertext) if ciphertext else {}
+    try:
+        from cryptography.fernet import Fernet
+
+        f = Fernet(key)
+        plaintext = f.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+        return json.loads(plaintext)
+    except Exception:
+        return json.loads(ciphertext) if ciphertext else {}
 
 
 def _decode_header_value(raw: Any) -> str:
@@ -163,6 +200,7 @@ class GmailAdapter:
         self.app_password = os.getenv("GMAIL_APP_PASSWORD")
         self.imap_host = os.getenv("GMAIL_IMAP_HOST", "imap.gmail.com")
         self.smtp_host = os.getenv("GMAIL_SMTP_HOST", "smtp.gmail.com")
+        self._thread_recipients: Dict[str, List[str]] = {}
         if not self.username or not self.app_password:
             raise RuntimeError("Gmail credentials not configured")
 
@@ -198,13 +236,18 @@ class GmailAdapter:
 
         priority = _priority_tag(subject)
         message_id = msg.get("Message-ID") or uid
-        thread_id = msg.get("Thread-Index") or message_id
+        thread_id = msg.get("Thread-Index") or msg.get("References") or message_id
+        participants = [
+            {"address": from_addr, "role": "from"} if from_addr else {},
+            {"address": to_addr or self.username, "role": "to"},
+        ]
+        # Cache recipients for reply resolution
+        addrs = [p.get("address") for p in participants if p.get("address")]
+        if addrs:
+            self._thread_recipients[thread_id] = addrs
         return {
             "channel": "email",
-            "participants": [
-                {"address": from_addr, "role": "from"} if from_addr else {},
-                {"address": to_addr or self.username, "role": "to"},
-            ],
+            "participants": participants,
             "subject": subject or "(no subject)",
             "body": body_text or "(no body)",
             "thread_id": thread_id,
@@ -246,7 +289,7 @@ class GmailAdapter:
                 msg = EmailMessage()
                 msg["Subject"] = f"Re: {thread_id}"
                 msg["From"] = self.username
-                to_list = recipients or [self.username]
+                to_list = recipients or self._thread_recipients.get(thread_id) or [self.username]
                 msg["To"] = ", ".join(to_list)
                 msg.set_content(body)
                 smtp.send_message(msg)
@@ -279,6 +322,25 @@ class UnisonAdapter:
 
     def __init__(self):
         self._messages: List[Dict[str, Any]] = []
+        self._store_path = Path(os.getenv("COMMS_UNISON_STORE_PATH", "/tmp/unison-comms-unison.json"))
+        self._store_key = _load_key(os.getenv("COMMS_UNISON_KEY"))
+        self._load_store()
+
+    def _load_store(self):
+        try:
+            if self._store_path.exists():
+                data = self._store_path.read_text()
+                self._messages = _decrypt_blob(data, self._store_key) or []
+        except Exception:
+            self._messages = []
+
+    def _persist(self):
+        try:
+            self._store_path.parent.mkdir(parents=True, exist_ok=True)
+            blob = _encrypt_blob(self._messages, self._store_key)
+            self._store_path.write_text(blob)
+        except Exception:
+            pass
 
     def fetch_messages(self, channel: str = "unison") -> List[Dict[str, Any]]:
         return [m for m in self._messages if m.get("channel") == channel]
@@ -300,6 +362,7 @@ class UnisonAdapter:
                 "metadata": {"in_reply_to": message_id},
             }
         )
+        self._persist()
         return {"status": "sent", "message_id": msg_id, "thread_id": thread_id, "provider": "unison"}
 
     def send_compose(
@@ -320,6 +383,7 @@ class UnisonAdapter:
                 "metadata": {"provider": "unison"},
             }
         )
+        self._persist()
         return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "unison"}
 
 

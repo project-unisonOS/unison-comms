@@ -35,7 +35,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
   - `GMAIL_APP_PASSWORD=<app password>` (generated after enabling 2FA; see docs/email-onboarding.md)
   - Optional: `GMAIL_IMAP_HOST`, `GMAIL_SMTP_HOST`
 - If Gmail config is missing or invalid, the service falls back to the in-memory stub.
-- Unison-to-Unison channel: handled locally via an in-memory adapter (`channel: "unison"`), storing messages on-device.
+- Unison-to-Unison channel: handled locally via an in-memory adapter (`channel: "unison"`), storing messages on-device. You can override storage path/key:
+  - `COMMS_UNISON_STORE_PATH=/tmp/unison-comms-unison.json`
+  - `COMMS_UNISON_KEY=<optional base64 Fernet key>` (if unset, stored plaintext locally)
 
 ### Adapter interface (for adding more providers)
 
