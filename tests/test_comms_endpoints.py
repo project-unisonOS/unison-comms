@@ -1,0 +1,50 @@
+import pathlib
+import sys
+
+from fastapi.testclient import TestClient
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.append(str(ROOT / "src"))
+
+from main import app  # noqa: E402
+
+
+def test_comms_check_returns_stub_card():
+    client = TestClient(app)
+    resp = client.post("/comms/check", json={"person_id": "p1", "channel": "email"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["person_id"] == "p1"
+    assert isinstance(body.get("messages"), list) and body["messages"]
+    assert isinstance(body.get("cards"), list) and body["cards"][0]["origin_intent"] == "comms.check"
+
+
+def test_comms_summarize_returns_summary():
+    client = TestClient(app)
+    resp = client.post("/comms/summarize", json={"person_id": "p1", "window": "today"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "summary" in body
+    assert body["cards"][0]["origin_intent"] == "comms.summarize"
+
+
+def test_comms_reply_requires_ids():
+    client = TestClient(app)
+    resp = client.post("/comms/reply", json={"person_id": "p1", "thread_id": "t1", "message_id": "m1", "body": "ok"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "sent"
+    assert body["origin_intent"] == "comms.reply"
+
+
+def test_comms_compose_requires_recipients_and_subject():
+    client = TestClient(app)
+    resp = client.post(
+        "/comms/compose",
+        json={"person_id": "p1", "channel": "email", "recipients": ["a@example.com"], "subject": "Hi", "body": "Hello"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "sent"
+    assert body["origin_intent"] == "comms.compose"
