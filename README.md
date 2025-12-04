@@ -26,6 +26,29 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 - `POST /comms/reply` — validates identifiers, returns confirmation
 - `POST /comms/compose` — validates recipients/subject, returns confirmation and stores the composed message in memory
 
+## Email adapters
+
+- Default: in-memory stub (no external network, good for local dev/tests).
+- Optional Gmail (IMAP/SMTP) when configured via env:
+  - `COMMS_EMAIL_PROVIDER=gmail`
+  - `GMAIL_USERNAME=<your gmail address>`
+  - `GMAIL_APP_PASSWORD=<app password>` (generated after enabling 2FA; see docs/email-onboarding.md)
+  - Optional: `GMAIL_IMAP_HOST`, `GMAIL_SMTP_HOST`
+- If Gmail config is missing or invalid, the service falls back to the in-memory stub.
+
+## Onboarding flows
+
+- Developer (configure Gmail):
+  - Enable 2FA in your Google account.
+  - Create an App Password (choose “Mail” → “Other/Custom Name”).
+  - Export as env vars: `COMMS_EMAIL_PROVIDER=gmail`, `GMAIL_USERNAME`, `GMAIL_APP_PASSWORD`.
+  - Run the service and hit `/comms/check` to see live normalized messages (if available).
+- Person (conversational flow, edge-first):
+  - Companion asks for email provider (“Gmail”) and address.
+  - Explains that tokens/app passwords stay local and never leave the device.
+  - Prompts for a one-time app password or OAuth token; stores it encrypted on-device.
+  - Confirms by running a `comms.check` and presenting “Messages to respond to” cards on the dashboard.
+
 ## Docs
 
 Full docs at https://project-unisonos.github.io
