@@ -36,6 +36,16 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
   - Optional: `GMAIL_IMAP_HOST`, `GMAIL_SMTP_HOST`
 - If Gmail config is missing or invalid, the service falls back to the in-memory stub.
 
+### Adapter interface (for adding more providers)
+
+- Implement the `EmailAdapter` protocol (see `src/main.py`):
+  - `fetch_messages(channel: str = "email") -> list[dict]` returning normalized messages.
+  - `send_reply(person_id, thread_id, message_id, body, recipients=None) -> dict`.
+  - `send_compose(person_id, channel, recipients, subject, body) -> dict`.
+- Update `_resolve_adapter()` to select your adapter based on an env flag (e.g., `COMMS_EMAIL_PROVIDER=myprovider`).
+- Keep provider-specific secrets in env vars and ensure they remain on-device.
+- Normalize output to the common message shape and set `context_tags` (e.g., `["comms", "email", "p1"]`).
+
 ## Onboarding flows
 
 - Developer (configure Gmail):
