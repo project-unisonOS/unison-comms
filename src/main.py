@@ -95,13 +95,15 @@ class InMemoryEmailAdapter:
     def fetch_messages(self, channel: str = "email") -> List[Dict[str, Any]]:
         return [m for m in self._messages if m.get("channel") == channel]
 
-    def send_reply(self, person_id: str, thread_id: str, message_id: str, body: str) -> Dict[str, Any]:
+    def send_reply(self, person_id: str, thread_id: str, message_id: str, body: str, recipients: Optional[List[str]] = None) -> Dict[str, Any]:
         # Append a minimal reply artifact for traceability
         reply_id = f"reply-{int(time.time())}"
         self._messages.append(
             {
                 "channel": "email",
-                "participants": [{"address": f"{person_id}@example.com", "role": "from"}],
+                "participants": [{"address": f"{person_id}@example.com", "role": "from"}] + (
+                    [{"address": r, "role": "to"} for r in (recipients or [])]
+                ),
                 "subject": f"Re: {thread_id}",
                 "body": body,
                 "thread_id": thread_id,
@@ -221,19 +223,21 @@ class GmailAdapter:
             return []
         return messages
 
-    def send_reply(self, person_id: str, thread_id: str, message_id: str, body: str) -> Dict[str, Any]:
-        # This minimal implementation requires a recipient; if missing, we return stored status only.
+    def send_reply(
+        self, person_id: str, thread_id: str, message_id: str, body: str, recipients: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
         try:
             with self._connect_smtp() as smtp:
                 msg = EmailMessage()
                 msg["Subject"] = f"Re: {thread_id}"
                 msg["From"] = self.username
-                msg["To"] = self.username  # placeholder; real flow should resolve recipient
+                to_list = recipients or [self.username]
+                msg["To"] = ", ".join(to_list)
                 msg.set_content(body)
                 smtp.send_message(msg)
-        except Exception:
-            pass
-        return {"status": "sent", "message_id": message_id, "thread_id": thread_id, "provider": "gmail"}
+            return {"status": "sent", "message_id": message_id, "thread_id": thread_id, "provider": "gmail"}
+        except Exception as exc:
+            return {"status": "failed", "error": str(exc), "message_id": message_id, "thread_id": thread_id, "provider": "gmail"}
 
     def send_compose(
         self, person_id: str, channel: str, recipients: List[str], subject: str, body: str
@@ -335,14 +339,18 @@ def comms_reply(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     thread_id = body.get("thread_id")
     message_id = body.get("message_id")
     reply_body = body.get("body") or ""
+    recipients = body.get("recipients") if isinstance(body.get("recipients"), list) else None
     if not isinstance(person_id, str) or not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
     if not isinstance(thread_id, str) or not thread_id:
         raise HTTPException(status_code=400, detail="thread_id required")
     if not isinstance(message_id, str) or not message_id:
         raise HTTPException(status_code=400, detail="message_id required")
-    result = _email_adapter.send_reply(person_id, thread_id, message_id, reply_body)
-    return {**result, "ok": True, "person_id": person_id, "origin_intent": "comms.reply"}
+    result = _email_adapter.send_reply(person_id, thread_id, message_id, reply_body, recipients)
+    ok = result.get("status") == "sent"
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"send failed: {result.get('error')}")
+    return {**result, "ok": ok, "person_id": person_id, "origin_intent": "comms.reply"}
 
 
 @app.post("/comms/compose")
