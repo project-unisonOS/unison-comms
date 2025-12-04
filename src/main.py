@@ -317,13 +317,23 @@ class GmailAdapter:
 
 class UnisonAdapter:
     """
-    Local Unison-to-Unison messaging adapter (edge-only, in-memory stub).
+    Local Unison-to-Unison messaging adapter (edge-only, persisted locally).
     """
 
     def __init__(self):
         self._messages: List[Dict[str, Any]] = []
         self._store_path = Path(os.getenv("COMMS_UNISON_STORE_PATH", "/tmp/unison-comms-unison.json"))
-        self._store_key = _load_key(os.getenv("COMMS_UNISON_KEY"))
+        # Default to a generated key per node if none is provided, to keep store encrypted by default.
+        env_key = os.getenv("COMMS_UNISON_KEY")
+        if env_key:
+            self._store_key = _load_key(env_key)
+        else:
+            try:
+                from cryptography.fernet import Fernet
+                gen = Fernet.generate_key()
+                self._store_key = gen
+            except Exception:
+                self._store_key = None
         self._load_store()
 
     def _load_store(self):
