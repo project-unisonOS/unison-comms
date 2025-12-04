@@ -17,6 +17,9 @@ def test_comms_check_returns_stub_card():
     assert body["ok"] is True
     assert body["person_id"] == "p1"
     assert isinstance(body.get("messages"), list) and body["messages"]
+    msg = body["messages"][0]
+    assert msg["channel"] == "email"
+    assert "comms" in msg.get("context_tags", [])
     assert isinstance(body.get("cards"), list) and body["cards"][0]["origin_intent"] == "comms.check"
 
 
@@ -48,3 +51,7 @@ def test_comms_compose_requires_recipients_and_subject():
     body = resp.json()
     assert body["status"] == "sent"
     assert body["origin_intent"] == "comms.compose"
+    # ensure composed message stored and tagged
+    resp2 = client.post("/comms/check", json={"person_id": "p1", "channel": "email"})
+    messages = resp2.json()["messages"]
+    assert any(m for m in messages if m.get("message_id") == body["message_id"])

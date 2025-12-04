@@ -21,10 +21,10 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 
 ## Endpoints (stubbed)
 - `GET /health`, `GET /readyz`
-- `POST /comms/check` — returns normalized messages + dashboard-friendly cards
+- `POST /comms/check` — returns normalized messages + dashboard-friendly cards via in-memory email adapter stub
 - `POST /comms/summarize` — returns a summary and summary cards
 - `POST /comms/reply` — validates identifiers, returns confirmation
-- `POST /comms/compose` — validates recipients/subject, returns confirmation
+- `POST /comms/compose` — validates recipients/subject, returns confirmation and stores the composed message in memory
 
 ## Docs
 

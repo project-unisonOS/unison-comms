@@ -17,21 +17,96 @@ if BatonMiddleware and not _disable_auth:
     app.add_middleware(BatonMiddleware)
 
 
-def _sample_message(channel: str = "email") -> Dict[str, Any]:
-    """Return a stub normalized message shape for testing and UI placeholder data."""
-    return {
-        "channel": channel,
-        "participants": [
-            {"address": "sender@example.com", "role": "from"},
-            {"address": "you@example.com", "role": "to"},
-        ],
-        "subject": "Sample message",
-        "body": "This is a placeholder message body.",
-        "thread_id": "sample-thread",
-        "message_id": "sample-message",
-        "context_tags": ["comms", channel, "p1"],
-        "metadata": {"source": "stub"},
-    }
+def _priority_tag(subject: str) -> str:
+    sub = subject.lower()
+    if "urgent" in sub or "action required" in sub:
+        return "p0"
+    if "important" in sub:
+        return "p1"
+    return "p2"
+
+
+class EmailAdapter:
+    """
+    Simple in-memory email adapter stub.
+
+    In production this would call a provider (IMAP/SMTP/OAuth), but for now it keeps
+    everything on-device and produces normalized messages for the orchestrator.
+    """
+
+    def __init__(self):
+        self._messages: List[Dict[str, Any]] = []
+        self._seed_messages()
+
+    def _seed_messages(self):
+        self._messages = [
+            {
+                "channel": "email",
+                "participants": [
+                    {"address": "alice@example.com", "role": "from"},
+                    {"address": "you@example.com", "role": "to"},
+                ],
+                "subject": "Urgent: design review",
+                "body": "Can you review the design by tomorrow?",
+                "thread_id": "thread-1",
+                "message_id": "msg-1",
+                "context_tags": ["comms", "email", "p0", "project:unisonos"],
+                "metadata": {"source": "stub"},
+            },
+            {
+                "channel": "email",
+                "participants": [
+                    {"address": "team@example.com", "role": "from"},
+                    {"address": "you@example.com", "role": "to"},
+                ],
+                "subject": "Weekly update",
+                "body": "Highlights and blockers for this week.",
+                "thread_id": "thread-2",
+                "message_id": "msg-2",
+                "context_tags": ["comms", "email", "p2"],
+                "metadata": {"source": "stub"},
+            },
+        ]
+
+    def fetch_messages(self, channel: str = "email") -> List[Dict[str, Any]]:
+        return [m for m in self._messages if m.get("channel") == channel]
+
+    def send_reply(self, person_id: str, thread_id: str, message_id: str, body: str) -> Dict[str, Any]:
+        # Append a minimal reply artifact for traceability
+        reply_id = f"reply-{int(time.time())}"
+        self._messages.append(
+            {
+                "channel": "email",
+                "participants": [{"address": f"{person_id}@example.com", "role": "from"}],
+                "subject": f"Re: {thread_id}",
+                "body": body,
+                "thread_id": thread_id,
+                "message_id": reply_id,
+                "context_tags": ["comms", "email", "sent"],
+                "metadata": {"in_reply_to": message_id},
+            }
+        )
+        return {"status": "sent", "message_id": reply_id, "thread_id": thread_id}
+
+    def send_compose(self, person_id: str, channel: str, recipients: List[str], subject: str, body: str) -> Dict[str, Any]:
+        msg_id = f"composed-{int(time.time())}"
+        tags = ["comms", channel, _priority_tag(subject)]
+        self._messages.append(
+            {
+                "channel": channel,
+                "participants": [{"address": r, "role": "to"} for r in recipients],
+                "subject": subject,
+                "body": body,
+                "thread_id": msg_id,
+                "message_id": msg_id,
+                "context_tags": tags,
+                "metadata": {"sender": f"{person_id}@example.com"},
+            }
+        )
+        return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags}
+
+
+_email_adapter = EmailAdapter()
 
 
 def _card_for_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -60,15 +135,15 @@ def readyz() -> Dict[str, Any]:
 def comms_check(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
     Check for new/unread communications.
-    Stub implementation returns a static message and derived card.
+    Uses the in-memory email adapter stub and returns normalized messages + derived cards.
     """
     person_id = body.get("person_id") or "local-user"
     if not isinstance(person_id, str) or not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
     channel = body.get("channel") or "email"
-    message = _sample_message(channel=channel)
-    card = _card_for_message(message)
-    return {"ok": True, "person_id": person_id, "messages": [message], "cards": [card]}
+    messages = _email_adapter.fetch_messages(channel=channel)
+    cards = [_card_for_message(m) for m in messages]
+    return {"ok": True, "person_id": person_id, "messages": messages, "cards": cards}
 
 
 @app.post("/comms/summarize")
@@ -109,14 +184,8 @@ def comms_reply(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="thread_id required")
     if not isinstance(message_id, str) or not message_id:
         raise HTTPException(status_code=400, detail="message_id required")
-    return {
-        "ok": True,
-        "person_id": person_id,
-        "thread_id": thread_id,
-        "message_id": message_id,
-        "status": "sent",
-        "origin_intent": "comms.reply",
-    }
+    result = _email_adapter.send_reply(person_id, thread_id, message_id, reply_body)
+    return {**result, "ok": True, "person_id": person_id, "origin_intent": "comms.reply"}
 
 
 @app.post("/comms/compose")
@@ -136,15 +205,15 @@ def comms_compose(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="recipients required")
     if not subject:
         raise HTTPException(status_code=400, detail="subject required")
+    result = _email_adapter.send_compose(person_id, channel, recipients, subject, msg_body)
     return {
         "ok": True,
         "person_id": person_id,
         "channel": channel,
         "recipients": recipients,
         "subject": subject,
-        "message_id": f"composed-{int(time.time())}",
-        "status": "sent",
         "origin_intent": "comms.compose",
+        **result,
     }
 
 
