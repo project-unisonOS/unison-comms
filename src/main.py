@@ -6,7 +6,7 @@ import email
 from email.message import EmailMessage
 from email.header import decode_header
 from email.utils import parseaddr
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Protocol
 
 from fastapi import Body, FastAPI, HTTPException
 
@@ -49,6 +49,21 @@ def _decode_header_value(raw: Any) -> str:
         except Exception:
             return raw
     return str(raw)
+
+
+class EmailAdapter(Protocol):
+    def fetch_messages(self, channel: str = "email") -> List[Dict[str, Any]]:
+        ...
+
+    def send_reply(
+        self, person_id: str, thread_id: str, message_id: str, body: str, recipients: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        ...
+
+    def send_compose(
+        self, person_id: str, channel: str, recipients: List[str], subject: str, body: str
+    ) -> Dict[str, Any]:
+        ...
 
 
 class InMemoryEmailAdapter:
