@@ -55,3 +55,18 @@ def test_comms_compose_requires_recipients_and_subject():
     resp2 = client.post("/comms/check", json={"person_id": "p1", "channel": "email"})
     messages = resp2.json()["messages"]
     assert any(m for m in messages if m.get("message_id") == body["message_id"])
+
+
+def test_unison_compose_and_check():
+    client = TestClient(app)
+    resp = client.post(
+        "/comms/compose",
+        json={"person_id": "u1", "channel": "unison", "recipients": ["u2"], "subject": "Hello", "body": "Hi there"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "sent"
+    assert body.get("provider") == "unison"
+    resp2 = client.post("/comms/check", json={"person_id": "u2", "channel": "unison"})
+    msgs = resp2.json()["messages"]
+    assert any(m for m in msgs if m.get("message_id") == body["message_id"])

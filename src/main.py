@@ -272,7 +272,58 @@ class GmailAdapter:
         return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "gmail"}
 
 
-def _resolve_adapter():
+class UnisonAdapter:
+    """
+    Local Unison-to-Unison messaging adapter (edge-only, in-memory stub).
+    """
+
+    def __init__(self):
+        self._messages: List[Dict[str, Any]] = []
+
+    def fetch_messages(self, channel: str = "unison") -> List[Dict[str, Any]]:
+        return [m for m in self._messages if m.get("channel") == channel]
+
+    def send_reply(
+        self, person_id: str, thread_id: str, message_id: str, body: str, recipients: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        msg_id = f"unison-reply-{int(time.time())}"
+        participants = [{"address": person_id, "role": "from"}] + [{"address": r, "role": "to"} for r in (recipients or [])]
+        self._messages.append(
+            {
+                "channel": "unison",
+                "participants": participants,
+                "subject": f"Re: {thread_id}",
+                "body": body,
+                "thread_id": thread_id,
+                "message_id": msg_id,
+                "context_tags": ["comms", "unison", "sent"],
+                "metadata": {"in_reply_to": message_id},
+            }
+        )
+        return {"status": "sent", "message_id": msg_id, "thread_id": thread_id, "provider": "unison"}
+
+    def send_compose(
+        self, person_id: str, channel: str, recipients: List[str], subject: str, body: str
+    ) -> Dict[str, Any]:
+        msg_id = f"unison-{int(time.time())}"
+        tags = ["comms", "unison", _priority_tag(subject)]
+        participants = [{"address": person_id, "role": "from"}] + [{"address": r, "role": "to"} for r in recipients]
+        self._messages.append(
+            {
+                "channel": "unison",
+                "participants": participants,
+                "subject": subject,
+                "body": body,
+                "thread_id": msg_id,
+                "message_id": msg_id,
+                "context_tags": tags,
+                "metadata": {"provider": "unison"},
+            }
+        )
+        return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "unison"}
+
+
+def _resolve_email_adapter():
     provider = os.getenv("COMMS_EMAIL_PROVIDER", "stub").lower()
     if provider == "gmail":
         try:
@@ -282,7 +333,14 @@ def _resolve_adapter():
     return InMemoryEmailAdapter()
 
 
-_email_adapter = _resolve_adapter()
+_email_adapter = _resolve_email_adapter()
+_unison_adapter = UnisonAdapter()
+
+
+def _get_adapter(channel: str) -> EmailAdapter:
+    if channel == "unison":
+        return _unison_adapter
+    return _email_adapter
 
 
 def _card_for_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -311,13 +369,14 @@ def readyz() -> Dict[str, Any]:
 def comms_check(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
     Check for new/unread communications.
-    Uses the in-memory email adapter stub and returns normalized messages + derived cards.
+    Uses the configured adapter (email/unison) and returns normalized messages + derived cards.
     """
     person_id = body.get("person_id") or "local-user"
     if not isinstance(person_id, str) or not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
     channel = body.get("channel") or "email"
-    messages = _email_adapter.fetch_messages(channel=channel)
+    adapter = _get_adapter(channel)
+    messages = adapter.fetch_messages(channel=channel)
     cards = [_card_for_message(m) for m in messages]
     return {"ok": True, "person_id": person_id, "messages": messages, "cards": cards}
 
@@ -361,7 +420,8 @@ def comms_reply(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="thread_id required")
     if not isinstance(message_id, str) or not message_id:
         raise HTTPException(status_code=400, detail="message_id required")
-    result = _email_adapter.send_reply(person_id, thread_id, message_id, reply_body, recipients)
+    adapter = _get_adapter(body.get("channel") or "email")
+    result = adapter.send_reply(person_id, thread_id, message_id, reply_body, recipients)
     ok = result.get("status") == "sent"
     if not ok:
         raise HTTPException(status_code=502, detail=f"send failed: {result.get('error')}")
@@ -385,7 +445,8 @@ def comms_compose(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="recipients required")
     if not subject:
         raise HTTPException(status_code=400, detail="subject required")
-    result = _email_adapter.send_compose(person_id, channel, recipients, subject, msg_body)
+    adapter = _get_adapter(channel)
+    result = adapter.send_compose(person_id, channel, recipients, subject, msg_body)
     return {
         "ok": True,
         "person_id": person_id,
