@@ -334,6 +334,8 @@ class UnisonAdapter:
                 self._store_key = gen
             except Exception:
                 self._store_key = None
+        if not self._store_key:
+            raise RuntimeError("Unison adapter requires COMMS_UNISON_KEY or cryptography support to encrypt the store")
         self._load_store()
 
     def _load_store(self):
