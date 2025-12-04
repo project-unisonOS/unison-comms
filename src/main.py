@@ -12,6 +12,7 @@ from email.utils import parseaddr
 from typing import Any, Dict, List, Optional, Protocol
 
 from fastapi import Body, FastAPI, HTTPException
+from sse_starlette.sse import EventSourceResponse
 
 try:
     from unison_common import BatonMiddleware  # type: ignore
@@ -24,6 +25,8 @@ _disable_auth = os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() in {"1", "t
 
 if BatonMiddleware and not _disable_auth:
     app.add_middleware(BatonMiddleware)
+
+_unison_event_listeners: List[Any] = []
 
 
 def _priority_tag(subject: str) -> str:
@@ -396,6 +399,7 @@ class UnisonAdapter:
             }
         )
         self._persist()
+        _unison_event_listeners  # no-op placeholder to appease linters; SSE uses _messages directly.
         return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "unison"}
 
 
@@ -417,6 +421,20 @@ def _get_adapter(channel: str) -> EmailAdapter:
     if channel == "unison":
         return _unison_adapter
     return _email_adapter
+
+
+@app.get("/stream/unison")
+async def stream_unison():
+    """Server-sent events stream for Unison channel messages."""
+    async def event_generator():
+        last_len = len(_unison_adapter._messages)
+        while True:
+            if len(_unison_adapter._messages) > last_len:
+                new_msgs = _unison_adapter._messages[last_len:]
+                last_len = len(_unison_adapter._messages)
+                yield {"event": "unison", "data": json.dumps({"messages": new_msgs})}
+            await asyncio.sleep(2)
+    return EventSourceResponse(event_generator())
 
 
 def _card_for_message(msg: Dict[str, Any]) -> Dict[str, Any]:
