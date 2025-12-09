@@ -2,15 +2,16 @@
 
 FROM python:3.11-slim
 
+ARG REPO_PATH="unison-comms"
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-COPY requirements.txt .
+COPY ${REPO_PATH}/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY src ./src
+COPY ${REPO_PATH}/src ./src
 
 EXPOSE 8080
 
