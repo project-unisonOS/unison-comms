@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.11-slim
+FROM python:3.11-slim@sha256:26fe52250f1b8012f5061c8f7228e6fca4f100aa3f99b41a8aa2608a42c5db43
 
 ARG REPO_PATH="unison-comms"
 WORKDIR /app
