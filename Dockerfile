@@ -18,4 +18,8 @@ COPY ${REPO_PATH}/src ./src
 
 EXPOSE 8080
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+ENV COMMS_HOST=127.0.0.1
+ENV COMMS_PORT=8080
+
+# Safe default: loopback-only. For container networking, set COMMS_UNSAFE_ALLOW_NONLOCAL=true explicitly.
+CMD ["python", "src/run.py"]

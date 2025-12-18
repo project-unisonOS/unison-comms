@@ -9,7 +9,13 @@ New service skeleton (active) — stubbed HTTP API and health checks; adapters t
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
 pip install -c ../constraints.txt -r requirements.txt
-uvicorn src.main:app --host 0.0.0.0 --port 8080
+python src/run.py
+```
+
+Security note: `unison-comms` defaults to loopback-only binding. To bind to `0.0.0.0` for devstack/container networking, set:
+```bash
+export COMMS_HOST=0.0.0.0
+export COMMS_UNSAFE_ALLOW_NONLOCAL=true
 ```
 
 ## Testing

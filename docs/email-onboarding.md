@@ -6,6 +6,9 @@ This guide covers two perspectives:
 
 ## Developer setup (Gmail with app password)
 
+Note: App passwords are a developer convenience and are not the production onboarding path.
+Production connector onboarding should use OAuth via `unison-capability` (device authorization grant) with secrets stored outside manifests and referenced by secret handles.
+
 1. **Enable 2FA** on the Gmail account you want to use.
 2. **Create an App Password**:
    - Google Account → Security → “App passwords”.

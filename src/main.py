@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 import imaplib
 import smtplib
 import email
@@ -11,7 +12,7 @@ from email.header import decode_header
 from email.utils import parseaddr
 from typing import Any, Dict, List, Optional, Protocol
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 try:
@@ -423,6 +424,79 @@ def _get_adapter(channel: str) -> EmailAdapter:
     return _email_adapter
 
 
+def _comms_check_impl(body: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = body.get("person_id") or "local-user"
+    if not isinstance(person_id, str) or not person_id:
+        raise HTTPException(status_code=400, detail="person_id required")
+    channel = body.get("channel") or "email"
+    adapter = _get_adapter(channel)
+    messages = adapter.fetch_messages(channel=channel)
+    cards = [_card_for_message(m) for m in messages]
+    return {"ok": True, "person_id": person_id, "messages": messages, "cards": cards}
+
+
+def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = body.get("person_id") or "local-user"
+    if not isinstance(person_id, str) or not person_id:
+        raise HTTPException(status_code=400, detail="person_id required")
+    window = body.get("window") or "today"
+    summary_text = f"Summary for {window}: 1 important thread, 2 low-priority threads."
+    summary_card = {
+        "id": f"comms-summary-{window}",
+        "type": "summary",
+        "title": f"Comms summary ({window})",
+        "body": summary_text,
+        "tags": ["comms", "summary"],
+        "origin_intent": "comms.summarize",
+    }
+    return {"ok": True, "person_id": person_id, "summary": summary_text, "cards": [summary_card]}
+
+
+def _comms_reply_impl(body: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = body.get("person_id") or "local-user"
+    thread_id = body.get("thread_id")
+    message_id = body.get("message_id")
+    reply_body = body.get("body") or ""
+    recipients = body.get("recipients") if isinstance(body.get("recipients"), list) else None
+    if not isinstance(person_id, str) or not person_id:
+        raise HTTPException(status_code=400, detail="person_id required")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise HTTPException(status_code=400, detail="thread_id required")
+    if not isinstance(message_id, str) or not message_id:
+        raise HTTPException(status_code=400, detail="message_id required")
+    adapter = _get_adapter(body.get("channel") or "email")
+    result = adapter.send_reply(person_id, thread_id, message_id, reply_body, recipients)
+    ok = result.get("status") == "sent"
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"send failed: {result.get('error')}")
+    return {**result, "ok": ok, "person_id": person_id, "origin_intent": "comms.reply"}
+
+
+def _comms_compose_impl(body: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = body.get("person_id") or "local-user"
+    channel = body.get("channel") or "email"
+    recipients: Optional[List[str]] = body.get("recipients")
+    subject = body.get("subject") or ""
+    msg_body = body.get("body") or ""
+    if not isinstance(person_id, str) or not person_id:
+        raise HTTPException(status_code=400, detail="person_id required")
+    if not recipients or not isinstance(recipients, list):
+        raise HTTPException(status_code=400, detail="recipients required")
+    if not subject:
+        raise HTTPException(status_code=400, detail="subject required")
+    adapter = _get_adapter(channel)
+    result = adapter.send_compose(person_id, channel, recipients, subject, msg_body)
+    return {
+        "ok": True,
+        "person_id": person_id,
+        "channel": channel,
+        "recipients": recipients,
+        "subject": subject,
+        "origin_intent": "comms.compose",
+        **result,
+    }
+
+
 @app.get("/stream/unison")
 async def stream_unison():
     """Server-sent events stream for Unison channel messages."""
@@ -435,6 +509,12 @@ async def stream_unison():
                 yield {"event": "unison", "data": json.dumps({"messages": new_msgs})}
             await asyncio.sleep(2)
     return EventSourceResponse(event_generator())
+
+
+@app.get("/comms/unison/stream")
+async def stream_unison_compat():
+    """Compatibility alias for older renderer paths."""
+    return await stream_unison()
 
 
 def _card_for_message(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -465,14 +545,7 @@ def comms_check(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     Check for new/unread communications.
     Uses the configured adapter (email/unison) and returns normalized messages + derived cards.
     """
-    person_id = body.get("person_id") or "local-user"
-    if not isinstance(person_id, str) or not person_id:
-        raise HTTPException(status_code=400, detail="person_id required")
-    channel = body.get("channel") or "email"
-    adapter = _get_adapter(channel)
-    messages = adapter.fetch_messages(channel=channel)
-    cards = [_card_for_message(m) for m in messages]
-    return {"ok": True, "person_id": person_id, "messages": messages, "cards": cards}
+    return _comms_check_impl(body)
 
 
 @app.post("/comms/summarize")
@@ -481,20 +554,7 @@ def comms_summarize(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     Summarize communications over a time window or topic.
     Stub returns a canned summary and a summary card.
     """
-    person_id = body.get("person_id") or "local-user"
-    if not isinstance(person_id, str) or not person_id:
-        raise HTTPException(status_code=400, detail="person_id required")
-    window = body.get("window") or "today"
-    summary_text = f"Summary for {window}: 1 important thread, 2 low-priority threads."
-    summary_card = {
-        "id": f"comms-summary-{window}",
-        "type": "summary",
-        "title": f"Comms summary ({window})",
-        "body": summary_text,
-        "tags": ["comms", "summary"],
-        "origin_intent": "comms.summarize",
-    }
-    return {"ok": True, "person_id": person_id, "summary": summary_text, "cards": [summary_card]}
+    return _comms_summarize_impl(body)
 
 
 @app.post("/comms/reply")
@@ -503,23 +563,7 @@ def comms_reply(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     Send a reply to an existing thread/message.
     Stub validates identifiers and returns a confirmation payload.
     """
-    person_id = body.get("person_id") or "local-user"
-    thread_id = body.get("thread_id")
-    message_id = body.get("message_id")
-    reply_body = body.get("body") or ""
-    recipients = body.get("recipients") if isinstance(body.get("recipients"), list) else None
-    if not isinstance(person_id, str) or not person_id:
-        raise HTTPException(status_code=400, detail="person_id required")
-    if not isinstance(thread_id, str) or not thread_id:
-        raise HTTPException(status_code=400, detail="thread_id required")
-    if not isinstance(message_id, str) or not message_id:
-        raise HTTPException(status_code=400, detail="message_id required")
-    adapter = _get_adapter(body.get("channel") or "email")
-    result = adapter.send_reply(person_id, thread_id, message_id, reply_body, recipients)
-    ok = result.get("status") == "sent"
-    if not ok:
-        raise HTTPException(status_code=502, detail=f"send failed: {result.get('error')}")
-    return {**result, "ok": ok, "person_id": person_id, "origin_intent": "comms.reply"}
+    return _comms_reply_impl(body)
 
 
 @app.post("/comms/compose")
@@ -528,28 +572,59 @@ def comms_compose(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     Compose and send a new message.
     Stub validates required fields and returns a confirmation payload.
     """
-    person_id = body.get("person_id") or "local-user"
-    channel = body.get("channel") or "email"
-    recipients: Optional[List[str]] = body.get("recipients")
-    subject = body.get("subject") or ""
-    msg_body = body.get("body") or ""
-    if not isinstance(person_id, str) or not person_id:
-        raise HTTPException(status_code=400, detail="person_id required")
-    if not recipients or not isinstance(recipients, list):
-        raise HTTPException(status_code=400, detail="recipients required")
-    if not subject:
-        raise HTTPException(status_code=400, detail="subject required")
-    adapter = _get_adapter(channel)
-    result = adapter.send_compose(person_id, channel, recipients, subject, msg_body)
-    return {
-        "ok": True,
-        "person_id": person_id,
-        "channel": channel,
-        "recipients": recipients,
-        "subject": subject,
-        "origin_intent": "comms.compose",
-        **result,
-    }
+    return _comms_compose_impl(body)
+
+
+def _mcp_base_url(request: Request) -> str:
+    env = os.getenv("COMMS_PUBLIC_BASE_URL")
+    if env and isinstance(env, str) and env.strip():
+        return env.strip().rstrip("/")
+    # Best-effort inference from request
+    try:
+        return str(request.base_url).rstrip("/")
+    except Exception:
+        return "http://localhost:8080"
+
+
+@app.get("/mcp/registry")
+def mcp_registry(request: Request) -> Dict[str, Any]:
+    base = _mcp_base_url(request)
+    tools = [
+        {"name": "comms.check", "description": "Check for new/unread communications"},
+        {"name": "comms.summarize", "description": "Summarize communications for a window/topic"},
+        {"name": "comms.reply", "description": "Send a reply to a thread/message"},
+        {"name": "comms.compose", "description": "Compose and send a new message"},
+        {"name": "comms.join_meeting", "description": "Return join info/card for a meeting"},
+        {"name": "comms.prepare_meeting", "description": "Return prep/agenda card for a meeting"},
+        {"name": "comms.debrief_meeting", "description": "Return debrief/summary card for a meeting"},
+    ]
+    return {"servers": [{"id": "unison-comms", "name": "unison-comms", "base_url": base, "tools": tools}]}
+
+
+@app.post("/tools/{tool_name}")
+def mcp_tool_call(tool_name: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    args = payload.get("arguments") if isinstance(payload, dict) else None
+    if not isinstance(args, dict):
+        args = {}
+    if tool_name == "comms.check":
+        return _comms_check_impl(args)
+    if tool_name == "comms.summarize":
+        return _comms_summarize_impl(args)
+    if tool_name == "comms.reply":
+        return _comms_reply_impl(args)
+    if tool_name == "comms.compose":
+        return _comms_compose_impl(args)
+    # Meeting tools map to the existing HTTP endpoints for now.
+    if tool_name in {"comms.join_meeting", "comms.prepare_meeting", "comms.debrief_meeting"}:
+        # Reuse existing endpoint handlers via direct call pattern
+        # (keeps response shapes identical to current HTTP surface).
+        if tool_name == "comms.join_meeting":
+            return comms_join_meeting(args)  # type: ignore[arg-type]
+        if tool_name == "comms.prepare_meeting":
+            return comms_prepare_meeting(args)  # type: ignore[arg-type]
+        if tool_name == "comms.debrief_meeting":
+            return comms_debrief_meeting(args)  # type: ignore[arg-type]
+    raise HTTPException(status_code=404, detail=f"tool not found: {tool_name}")
 
 
 @app.post("/comms/join_meeting")
