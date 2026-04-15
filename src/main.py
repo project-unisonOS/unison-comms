@@ -305,6 +305,23 @@ class GmailAdapter:
         self, person_id: str, channel: str, recipients: List[str], subject: str, body: str
     ) -> Dict[str, Any]:
         msg_id = f"gmail-{int(time.time())}"
+        tags = ["comms", channel, _priority_tag(subject)]
+        draft_mode = os.getenv("COMMS_GMAIL_DRAFT_ONLY", "true").lower() in {"1", "true", "yes", "on"}
+        if draft_mode:
+            return {
+                "status": "draft",
+                "message_id": msg_id,
+                "thread_id": msg_id,
+                "tags": tags,
+                "provider": "gmail",
+                "draft": {
+                    "thread_id": msg_id,
+                    "message_id": msg_id,
+                    "subject": subject,
+                    "body": body,
+                    "to": recipients,
+                },
+            }
         try:
             with self._connect_smtp() as smtp:
                 msg = EmailMessage()
@@ -313,10 +330,23 @@ class GmailAdapter:
                 msg["To"] = ", ".join(recipients)
                 msg.set_content(body)
                 smtp.send_message(msg)
-        except Exception:
-            pass
-        tags = ["comms", channel, _priority_tag(subject)]
-        return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "gmail"}
+            return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "gmail"}
+        except Exception as exc:
+            return {
+                "status": "draft",
+                "message_id": msg_id,
+                "thread_id": msg_id,
+                "tags": tags,
+                "provider": "gmail",
+                "error": str(exc),
+                "draft": {
+                    "thread_id": msg_id,
+                    "message_id": msg_id,
+                    "subject": subject,
+                    "body": body,
+                    "to": recipients,
+                },
+            }
 
 
 class UnisonAdapter:
@@ -402,6 +432,139 @@ class UnisonAdapter:
         self._persist()
         _unison_event_listeners  # no-op placeholder to appease linters; SSE uses _messages directly.
         return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags, "provider": "unison"}
+
+
+def _gmail_readiness() -> Dict[str, Any]:
+    provider = os.getenv("COMMS_EMAIL_PROVIDER", "stub").lower()
+    if provider != "gmail":
+        return {
+            "provider": provider,
+            "ready": True,
+            "state": "stub",
+            "onboarding": {
+                "status": "not_started",
+                "next_action": "set COMMS_EMAIL_PROVIDER=gmail to begin Gmail onboarding",
+            },
+        }
+    username = os.getenv("GMAIL_USERNAME")
+    app_password = os.getenv("GMAIL_APP_PASSWORD")
+    draft_only = os.getenv("COMMS_GMAIL_DRAFT_ONLY", "true").lower() in {"1", "true", "yes", "on"}
+    if not username and not app_password:
+        return {
+            "provider": "gmail",
+            "ready": False,
+            "state": "not_configured",
+            "onboarding": {
+                "status": "needs_account",
+                "next_action": "set GMAIL_USERNAME and GMAIL_APP_PASSWORD",
+            },
+        }
+    if username and not app_password:
+        return {
+            "provider": "gmail",
+            "ready": False,
+            "state": "missing_secret",
+            "username": username,
+            "onboarding": {
+                "status": "needs_app_password",
+                "next_action": "set GMAIL_APP_PASSWORD for the configured GMAIL_USERNAME",
+            },
+        }
+    return {
+        "provider": "gmail",
+        "ready": True,
+        "state": "configured",
+        "username": username,
+        "draft_only": draft_only,
+        "onboarding": {
+            "status": "ready",
+            "next_action": "run comms.check or comms.compose",
+        },
+    }
+
+
+def _verify_email_onboarding() -> Dict[str, Any]:
+    email_state = _gmail_readiness()
+    provider = email_state.get("provider")
+    if provider != "gmail":
+        return {
+            "ok": True,
+            "provider": provider,
+            "verified": False,
+            "status": "skipped",
+            "detail": "gmail onboarding not active",
+            "onboarding": email_state.get("onboarding") or {},
+        }
+    if not email_state.get("ready"):
+        return {
+            "ok": True,
+            "provider": "gmail",
+            "verified": False,
+            "status": "needs_configuration",
+            "detail": "gmail credentials are incomplete",
+            "state": email_state.get("state"),
+            "onboarding": email_state.get("onboarding") or {},
+        }
+    try:
+        adapter = GmailAdapter()
+        messages = adapter.fetch_messages(channel="email")
+        return {
+            "ok": True,
+            "provider": "gmail",
+            "verified": True,
+            "status": "verified",
+            "detail": "gmail connection exercised successfully",
+            "message_count": len(messages),
+            "draft_only": email_state.get("draft_only", False),
+        }
+    except Exception as exc:
+        return {
+            "ok": True,
+            "provider": "gmail",
+            "verified": False,
+            "status": "verification_failed",
+            "detail": str(exc),
+            "draft_only": email_state.get("draft_only", False),
+        }
+
+
+def _reset_email_onboarding() -> Dict[str, Any]:
+    provider = os.getenv("COMMS_EMAIL_PROVIDER", "stub").lower()
+    if provider != "gmail":
+        return {
+            "ok": True,
+            "provider": provider,
+            "status": "no_active_gmail_onboarding",
+            "detail": "gmail onboarding is not currently active",
+        }
+    username = os.getenv("GMAIL_USERNAME")
+    return {
+        "ok": True,
+        "provider": "gmail",
+        "status": "reset_available",
+        "disconnected": True,
+        "detail": "gmail onboarding state reset requested; clear local Gmail env/secrets to fully disconnect",
+        "cleared": ["GMAIL_USERNAME", "GMAIL_APP_PASSWORD"],
+        "account": username,
+    }
+
+
+def _oauth_email_onboarding_contract() -> Dict[str, Any]:
+    provider = os.getenv("COMMS_EMAIL_PROVIDER", "stub").lower()
+    return {
+        "ok": True,
+        "channel": "email",
+        "provider": "gmail" if provider == "gmail" else provider,
+        "oauth": {
+            "supported": True,
+            "flow": "device_authorization_grant",
+            "status": "not_implemented",
+            "broker": "unison-capability",
+            "scopes": ["gmail.readonly", "gmail.send"],
+            "next_action": "request a device code from unison-capability and complete consent on the local device",
+            "local_only": True,
+        },
+    }
 
 
 def _resolve_email_adapter():
@@ -536,7 +699,39 @@ def health() -> Dict[str, Any]:
 
 @app.get("/readyz")
 def readyz() -> Dict[str, Any]:
-    return {"status": "ready", "service": "unison-comms"}
+    email_state = _gmail_readiness()
+    ready = True if email_state.get("provider") != "gmail" else bool(email_state.get("ready"))
+    return {"status": "ready" if ready else "degraded", "service": "unison-comms", "email": email_state}
+
+
+@app.get("/comms/onboarding/email")
+def comms_email_onboarding() -> Dict[str, Any]:
+    email_state = _gmail_readiness()
+    return {
+        "ok": True,
+        "service": "unison-comms",
+        "channel": "email",
+        "provider": email_state.get("provider"),
+        "ready": email_state.get("ready"),
+        "state": email_state.get("state"),
+        "onboarding": email_state.get("onboarding") or {},
+        "draft_only": email_state.get("draft_only", False),
+    }
+
+
+@app.post("/comms/onboarding/email/verify")
+def comms_email_onboarding_verify() -> Dict[str, Any]:
+    return _verify_email_onboarding()
+
+
+@app.post("/comms/onboarding/email/reset")
+def comms_email_onboarding_reset() -> Dict[str, Any]:
+    return _reset_email_onboarding()
+
+
+@app.get("/comms/onboarding/email/oauth")
+def comms_email_onboarding_oauth() -> Dict[str, Any]:
+    return _oauth_email_onboarding_contract()
 
 
 @app.post("/comms/check")

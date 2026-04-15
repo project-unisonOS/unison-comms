@@ -23,9 +23,15 @@ Production connector onboarding should use OAuth via `unison-capability` (device
    # export GMAIL_IMAP_HOST=imap.gmail.com
    # export GMAIL_SMTP_HOST=smtp.gmail.com
    ```
-4. **Run** `unison-comms` and call `POST /comms/check` to verify:
-   - Returns normalized messages with `context_tags` like `["comms","email","p0"]`.
-5. **Privacy/edge**: credentials remain on the device; nothing is written to repos.
+4. **Inspect onboarding/readiness** with `GET /comms/onboarding/email`:
+   - Returns bounded readiness and onboarding state such as `not_configured`, `missing_secret`, or `configured`.
+5. **Verify** with `POST /comms/onboarding/email/verify`:
+   - Exercises the current Gmail configuration and reports `verified`, `needs_configuration`, or `verification_failed`.
+6. **Compose behavior**:
+   - `POST /comms/compose` uses draft-first Gmail behavior by default (`COMMS_GMAIL_DRAFT_ONLY=true`) and returns a normalized `draft` result instead of falsely reporting `sent` on failure.
+7. **Disconnect/reset** with `POST /comms/onboarding/email/reset`:
+   - Returns a bounded reset contract and tells the caller which local Gmail env keys should be cleared to fully disconnect.
+8. **Privacy/edge**: credentials remain on the device; nothing is written to repos.
 
 ## Person onboarding flow (conversational)
 
@@ -37,18 +43,25 @@ Goal: connect email to UnisonOS without exposing secrets or breaking the “edge
    - You can disconnect at any time; no inbox is uploaded to cloud services.
 3. **Collect account info**:
    - Ask for email address.
-   - Offer guidance to generate an app password (or OAuth if implemented later).
-4. **Capture secret (one-time)**:
-   - Prompt to paste the app password (no logging; store encrypted locally).
-   - Confirm storage succeeded.
-5. **Verify**:
-   - Run `comms.check` once; if messages are found, present a “Messages to respond to” card on the dashboard.
-   - If no messages are available, return a success acknowledgment and suggest trying again later.
-6. **Next actions**:
-   - Offer summaries (`comms.summarize`), replies (`comms.reply`), or compose (`comms.compose`) through voice/chat.
-   - Remind how to disconnect or rotate credentials.
+   - Offer guidance to generate an app password, or show the OAuth-ready production path.
+4. **Expose onboarding state**:
+   - `GET /comms/onboarding/email` shows the current state and next action.
+5. **Capture secret (current bounded path)**:
+   - App-password handling is still external to this repo; once local config is present, `POST /comms/onboarding/email/verify` can exercise it.
+6. **OAuth-ready production contract**:
+   - `GET /comms/onboarding/email/oauth` advertises the intended device authorization flow through `unison-capability`, but does not yet execute it.
+7. **Next actions**:
+   - Offer summaries (`comms.summarize`), replies (`comms.reply`), or draft-first compose (`comms.compose`) through voice/chat.
+   - Use `POST /comms/onboarding/email/reset` to surface disconnect/reset guidance.
+
+### Current implemented endpoints
+- `GET /comms/onboarding/email`
+- `POST /comms/onboarding/email/verify`
+- `POST /comms/onboarding/email/reset`
+- `GET /comms/onboarding/email/oauth`
 
 ### UX notes
 - Keep prompts short and clear; never echo secrets back.
 - Emphasize local-only handling and explicit consent.
 - Handle failure paths gracefully (bad password, offline) with actionable guidance.
+- Do not imply OAuth or secret-store persistence is complete until those integrations actually exist.
