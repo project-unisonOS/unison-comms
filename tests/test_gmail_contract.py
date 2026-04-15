@@ -171,8 +171,41 @@ def test_email_onboarding_reset_reports_reset_available(monkeypatch):
     assert body["provider"] == "gmail"
     assert body["status"] == "reset_available"
     assert body["disconnected"] is True
+    assert body["credential_source"] == "env"
+    assert body["cleared_bootstrap_store"] is False
     assert "GMAIL_USERNAME" in body["cleared"]
     assert "GMAIL_APP_PASSWORD" in body["cleared"]
+
+
+def test_email_onboarding_reset_clears_bootstrap_store(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMS_EMAIL_PROVIDER", "gmail")
+    monkeypatch.setenv("COMMS_GMAIL_STORE_PATH", str(tmp_path / "gmail.json"))
+    monkeypatch.setenv("COMMS_GMAIL_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    monkeypatch.delenv("GMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+
+    client = TestClient(main.app)
+    bootstrap = client.post(
+        "/comms/onboarding/email/bootstrap",
+        json={
+            "provider": "gmail",
+            "username": "user@example.com",
+            "app_password": "app-password",
+        },
+    )
+    assert bootstrap.status_code == 200
+
+    resp = client.post("/comms/onboarding/email/reset")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["credential_source"] == "bootstrap_store"
+    assert body["cleared_bootstrap_store"] is True
+
+    ready = client.get("/comms/onboarding/email")
+    ready_body = ready.json()
+    assert ready_body["ready"] is False
+    assert ready_body["state"] == "not_configured"
 
 
 def test_email_onboarding_reset_reports_no_active_gmail(monkeypatch):

@@ -232,6 +232,16 @@ def _persist_gmail_bootstrap(data: Dict[str, Any]) -> bool:
         return False
 
 
+def _clear_gmail_bootstrap() -> bool:
+    store_path = _gmail_store_path()
+    try:
+        if store_path.exists():
+            store_path.unlink()
+        return True
+    except Exception:
+        return False
+
+
 def _gmail_credentials() -> Dict[str, Optional[str]]:
     stored = _load_gmail_bootstrap()
     return {
@@ -593,7 +603,10 @@ def _reset_email_onboarding() -> Dict[str, Any]:
             "status": "no_active_gmail_onboarding",
             "detail": "gmail onboarding is not currently active",
         }
-    username = os.getenv("GMAIL_USERNAME")
+    creds = _gmail_credentials()
+    cleared_store = False
+    if creds.get("source") == "bootstrap_store":
+        cleared_store = _clear_gmail_bootstrap()
     return {
         "ok": True,
         "provider": "gmail",
@@ -601,7 +614,9 @@ def _reset_email_onboarding() -> Dict[str, Any]:
         "disconnected": True,
         "detail": "gmail onboarding state reset requested; clear local Gmail env/secrets to fully disconnect",
         "cleared": ["GMAIL_USERNAME", "GMAIL_APP_PASSWORD"],
-        "account": username,
+        "cleared_bootstrap_store": cleared_store,
+        "credential_source": creds.get("source"),
+        "account": creds.get("username"),
     }
 
 
