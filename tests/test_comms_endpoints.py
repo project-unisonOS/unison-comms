@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT / "src"))
 
+import main  # noqa: E402
 from main import app  # noqa: E402
 
 
@@ -29,6 +30,33 @@ def test_comms_summarize_returns_summary():
     assert resp.status_code == 200
     body = resp.json()
     assert "summary" in body
+    assert body["message_count"] >= 1
+    assert body["cards"][0]["origin_intent"] == "comms.summarize"
+
+
+def test_comms_summarize_uses_adapter_messages(monkeypatch):
+    class _SummaryAdapter:
+        def fetch_messages(self, channel: str = "email"):
+            return [
+                {"context_tags": ["comms", "email", "p0"]},
+                {"context_tags": ["comms", "email", "p1"]},
+                {"context_tags": ["comms", "email", "p2"]},
+            ]
+
+        def send_reply(self, person_id, thread_id, message_id, body, recipients=None):
+            return {"status": "sent"}
+
+        def send_compose(self, person_id, channel, recipients, subject, body):
+            return {"status": "sent"}
+
+    monkeypatch.setattr(main, "_get_adapter", lambda channel: _SummaryAdapter())
+
+    client = TestClient(app)
+    resp = client.post("/comms/summarize", json={"person_id": "p1", "window": "today", "channel": "email"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["message_count"] == 3
+    assert body["summary"] == "Summary for today: 1 urgent, 1 important, 1 other threads."
     assert body["cards"][0]["origin_intent"] == "comms.summarize"
 
 

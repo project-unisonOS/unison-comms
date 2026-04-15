@@ -674,16 +674,34 @@ def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(person_id, str) or not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
     window = body.get("window") or "today"
-    summary_text = f"Summary for {window}: 1 important thread, 2 low-priority threads."
+    channel = body.get("channel") or "email"
+    adapter = _get_adapter(channel)
+    messages = adapter.fetch_messages(channel=channel)
+    p0 = sum(1 for m in messages if "p0" in (m.get("context_tags") or []))
+    p1 = sum(1 for m in messages if "p1" in (m.get("context_tags") or []))
+    other = max(len(messages) - p0 - p1, 0)
+    provider = "gmail" if channel == "email" and isinstance(adapter, GmailAdapter) else channel
+    if messages:
+        summary_text = f"Summary for {window}: {p0} urgent, {p1} important, {other} other threads."
+    else:
+        summary_text = f"Summary for {window}: no messages found."
     summary_card = {
         "id": f"comms-summary-{window}",
         "type": "summary",
         "title": f"Comms summary ({window})",
         "body": summary_text,
-        "tags": ["comms", "summary"],
+        "tags": ["comms", "summary", channel],
         "origin_intent": "comms.summarize",
     }
-    return {"ok": True, "person_id": person_id, "summary": summary_text, "cards": [summary_card]}
+    return {
+        "ok": True,
+        "person_id": person_id,
+        "channel": channel,
+        "provider": provider,
+        "message_count": len(messages),
+        "summary": summary_text,
+        "cards": [summary_card],
+    }
 
 
 def _comms_reply_impl(body: Dict[str, Any]) -> Dict[str, Any]:
