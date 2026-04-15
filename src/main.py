@@ -666,7 +666,20 @@ def _comms_check_impl(body: Dict[str, Any]) -> Dict[str, Any]:
     adapter = _get_adapter(channel)
     messages = adapter.fetch_messages(channel=channel)
     cards = [_card_for_message(m) for m in messages]
-    return {"ok": True, "person_id": person_id, "messages": messages, "cards": cards}
+    provider = "gmail" if channel == "email" and isinstance(adapter, GmailAdapter) else channel
+    status = "messages_found" if messages else "no_messages"
+    detail = "messages available" if messages else f"no {provider} messages found"
+    return {
+        "ok": True,
+        "person_id": person_id,
+        "channel": channel,
+        "provider": provider,
+        "status": status,
+        "detail": detail,
+        "message_count": len(messages),
+        "messages": messages,
+        "cards": cards,
+    }
 
 
 def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -681,10 +694,13 @@ def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
     p1 = sum(1 for m in messages if "p1" in (m.get("context_tags") or []))
     other = max(len(messages) - p0 - p1, 0)
     provider = "gmail" if channel == "email" and isinstance(adapter, GmailAdapter) else channel
+    status = "messages_found" if messages else "no_messages"
     if messages:
         summary_text = f"Summary for {window}: {p0} urgent, {p1} important, {other} other threads."
+        detail = f"summarized {len(messages)} {provider} messages"
     else:
-        summary_text = f"Summary for {window}: no messages found."
+        summary_text = f"Summary for {window}: no {provider} messages found."
+        detail = f"no {provider} messages available for summarization"
     summary_card = {
         "id": f"comms-summary-{window}",
         "type": "summary",
@@ -698,6 +714,8 @@ def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
         "person_id": person_id,
         "channel": channel,
         "provider": provider,
+        "status": status,
+        "detail": detail,
         "message_count": len(messages),
         "summary": summary_text,
         "cards": [summary_card],

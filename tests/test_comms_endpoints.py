@@ -17,6 +17,8 @@ def test_comms_check_returns_stub_card():
     body = resp.json()
     assert body["ok"] is True
     assert body["person_id"] == "p1"
+    assert body["status"] == "messages_found"
+    assert body["message_count"] >= 1
     assert isinstance(body.get("messages"), list) and body["messages"]
     msg = body["messages"][0]
     assert msg["channel"] == "email"
@@ -30,6 +32,7 @@ def test_comms_summarize_returns_summary():
     assert resp.status_code == 200
     body = resp.json()
     assert "summary" in body
+    assert body["status"] == "messages_found"
     assert body["message_count"] >= 1
     assert body["cards"][0]["origin_intent"] == "comms.summarize"
 
@@ -55,9 +58,55 @@ def test_comms_summarize_uses_adapter_messages(monkeypatch):
     resp = client.post("/comms/summarize", json={"person_id": "p1", "window": "today", "channel": "email"})
     assert resp.status_code == 200
     body = resp.json()
+    assert body["status"] == "messages_found"
     assert body["message_count"] == 3
     assert body["summary"] == "Summary for today: 1 urgent, 1 important, 1 other threads."
     assert body["cards"][0]["origin_intent"] == "comms.summarize"
+
+
+def test_comms_check_reports_no_messages(monkeypatch):
+    class _EmptyAdapter:
+        def fetch_messages(self, channel: str = "email"):
+            return []
+
+        def send_reply(self, person_id, thread_id, message_id, body, recipients=None):
+            return {"status": "sent"}
+
+        def send_compose(self, person_id, channel, recipients, subject, body):
+            return {"status": "sent"}
+
+    monkeypatch.setattr(main, "_get_adapter", lambda channel: _EmptyAdapter())
+
+    client = TestClient(app)
+    resp = client.post("/comms/check", json={"person_id": "p1", "channel": "email"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "no_messages"
+    assert body["message_count"] == 0
+    assert body["detail"] == "no email messages found"
+
+
+def test_comms_summarize_reports_no_messages(monkeypatch):
+    class _EmptyAdapter:
+        def fetch_messages(self, channel: str = "email"):
+            return []
+
+        def send_reply(self, person_id, thread_id, message_id, body, recipients=None):
+            return {"status": "sent"}
+
+        def send_compose(self, person_id, channel, recipients, subject, body):
+            return {"status": "sent"}
+
+    monkeypatch.setattr(main, "_get_adapter", lambda channel: _EmptyAdapter())
+
+    client = TestClient(app)
+    resp = client.post("/comms/summarize", json={"person_id": "p1", "window": "today", "channel": "email"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "no_messages"
+    assert body["message_count"] == 0
+    assert body["summary"] == "Summary for today: no email messages found."
+    assert body["detail"] == "no email messages available for summarization"
 
 
 def test_comms_reply_requires_ids():
