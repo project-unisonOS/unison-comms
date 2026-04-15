@@ -34,6 +34,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
 - `POST /comms/compose` — validates recipients/subject; Gmail currently supports draft-first bounded behavior
 - Email onboarding endpoints:
   - `GET /comms/onboarding/email` — current onboarding/readiness state
+  - `POST /comms/onboarding/email/bootstrap` — persist bounded local Gmail bootstrap credentials in the encrypted local store
   - `POST /comms/onboarding/email/verify` — bounded verification of current Gmail configuration
   - `POST /comms/onboarding/email/reset` — bounded disconnect/reset contract
   - `GET /comms/onboarding/email/oauth` — OAuth-ready device-flow contract, not yet implemented
@@ -51,6 +52,9 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
   - `GMAIL_APP_PASSWORD=<app password>` (generated after enabling 2FA; see docs/email-onboarding.md)
   - Optional: `GMAIL_IMAP_HOST`, `GMAIL_SMTP_HOST`
   - Optional: `COMMS_GMAIL_DRAFT_ONLY=true` (default) to keep compose in bounded draft-first mode
+  - Optional: `COMMS_GMAIL_STORE_PATH=/tmp/unison-comms-gmail.json`
+  - Optional: `COMMS_GMAIL_KEY=<base64 Fernet key>`
+- If Gmail env vars are absent, the service can also resolve credentials from the local encrypted bootstrap store.
 - If Gmail config is missing or invalid, the service falls back to the in-memory stub for adapter resolution.
 - Unison-to-Unison channel: handled locally via an in-memory adapter (`channel: "unison"`), storing messages on-device. You can override storage path/key:
   - `COMMS_UNISON_STORE_PATH=/tmp/unison-comms-unison.json`
@@ -73,6 +77,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 OTEL_SDK_DISABLED=true python -m pytest
   - Create an App Password (choose “Mail” → “Other/Custom Name”).
   - Export as env vars: `COMMS_EMAIL_PROVIDER=gmail`, `GMAIL_USERNAME`, `GMAIL_APP_PASSWORD`.
   - Use `GET /comms/onboarding/email` to inspect readiness.
+  - Use `POST /comms/onboarding/email/bootstrap` to persist local Gmail credentials without relying on env-only setup.
   - Use `POST /comms/onboarding/email/verify` to exercise the current Gmail config.
   - Use `POST /comms/onboarding/email/reset` for the bounded disconnect/reset contract.
 - Person (conversational flow, edge-first):

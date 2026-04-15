@@ -37,8 +37,10 @@ class _HealthyGmailAdapter:
         return [{"message_id": "m1"}, {"message_id": "m2"}]
 
 
-def test_readyz_reports_gmail_not_configured(monkeypatch):
+def test_readyz_reports_gmail_not_configured(monkeypatch, tmp_path):
     monkeypatch.setenv("COMMS_EMAIL_PROVIDER", "gmail")
+    monkeypatch.setenv("COMMS_GMAIL_STORE_PATH", str(tmp_path / "gmail.json"))
+    monkeypatch.setenv("COMMS_GMAIL_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     monkeypatch.delenv("GMAIL_USERNAME", raising=False)
     monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
 
@@ -53,8 +55,10 @@ def test_readyz_reports_gmail_not_configured(monkeypatch):
     assert body["email"]["onboarding"]["status"] == "needs_account"
 
 
-def test_email_onboarding_endpoint_reports_missing_secret(monkeypatch):
+def test_email_onboarding_endpoint_reports_missing_secret(monkeypatch, tmp_path):
     monkeypatch.setenv("COMMS_EMAIL_PROVIDER", "gmail")
+    monkeypatch.setenv("COMMS_GMAIL_STORE_PATH", str(tmp_path / "gmail.json"))
+    monkeypatch.setenv("COMMS_GMAIL_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
     monkeypatch.setenv("GMAIL_USERNAME", "user@example.com")
     monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
 
@@ -67,6 +71,35 @@ def test_email_onboarding_endpoint_reports_missing_secret(monkeypatch):
     assert body["ready"] is False
     assert body["state"] == "missing_secret"
     assert body["onboarding"]["status"] == "needs_app_password"
+
+
+def test_email_onboarding_bootstrap_persists_local_credentials(monkeypatch, tmp_path):
+    monkeypatch.setenv("COMMS_EMAIL_PROVIDER", "gmail")
+    monkeypatch.setenv("COMMS_GMAIL_STORE_PATH", str(tmp_path / "gmail.json"))
+    monkeypatch.setenv("COMMS_GMAIL_KEY", "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=")
+    monkeypatch.delenv("GMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+
+    client = TestClient(main.app)
+    resp = client.post(
+        "/comms/onboarding/email/bootstrap",
+        json={
+            "provider": "gmail",
+            "username": "user@example.com",
+            "app_password": "app-password",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["status"] == "bootstrapped"
+    assert body["credential_source"] == "bootstrap_store"
+
+    ready = client.get("/comms/onboarding/email")
+    ready_body = ready.json()
+    assert ready_body["ready"] is True
+    assert ready_body["state"] == "configured"
+    assert ready_body["credential_source"] == "bootstrap_store"
 
 
 def test_comms_compose_returns_gmail_draft_shape(monkeypatch):

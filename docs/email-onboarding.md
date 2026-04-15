@@ -25,13 +25,16 @@ Production connector onboarding should use OAuth via `unison-capability` (device
    ```
 4. **Inspect onboarding/readiness** with `GET /comms/onboarding/email`:
    - Returns bounded readiness and onboarding state such as `not_configured`, `missing_secret`, or `configured`.
-5. **Verify** with `POST /comms/onboarding/email/verify`:
+   - Also reports `credential_source` when credentials are being resolved from env or the local bootstrap store.
+5. **Bootstrap local credentials** with `POST /comms/onboarding/email/bootstrap`:
+   - Persists Gmail app-password credentials into the local encrypted bootstrap store so the service is not limited to env-only setup.
+6. **Verify** with `POST /comms/onboarding/email/verify`:
    - Exercises the current Gmail configuration and reports `verified`, `needs_configuration`, or `verification_failed`.
-6. **Compose behavior**:
+7. **Compose behavior**:
    - `POST /comms/compose` uses draft-first Gmail behavior by default (`COMMS_GMAIL_DRAFT_ONLY=true`) and returns a normalized `draft` result instead of falsely reporting `sent` on failure.
-7. **Disconnect/reset** with `POST /comms/onboarding/email/reset`:
+8. **Disconnect/reset** with `POST /comms/onboarding/email/reset`:
    - Returns a bounded reset contract and tells the caller which local Gmail env keys should be cleared to fully disconnect.
-8. **Privacy/edge**: credentials remain on the device; nothing is written to repos.
+9. **Privacy/edge**: credentials remain on the device; nothing is written to repos.
 
 ## Person onboarding flow (conversational)
 
@@ -47,15 +50,18 @@ Goal: connect email to UnisonOS without exposing secrets or breaking the “edge
 4. **Expose onboarding state**:
    - `GET /comms/onboarding/email` shows the current state and next action.
 5. **Capture secret (current bounded path)**:
-   - App-password handling is still external to this repo; once local config is present, `POST /comms/onboarding/email/verify` can exercise it.
-6. **OAuth-ready production contract**:
+   - `POST /comms/onboarding/email/bootstrap` can persist Gmail app-password credentials into the local encrypted bootstrap store.
+6. **Verify**:
+   - `POST /comms/onboarding/email/verify` can then exercise the configured Gmail path.
+7. **OAuth-ready production contract**:
    - `GET /comms/onboarding/email/oauth` advertises the intended device authorization flow through `unison-capability`, but does not yet execute it.
-7. **Next actions**:
+8. **Next actions**:
    - Offer summaries (`comms.summarize`), replies (`comms.reply`), or draft-first compose (`comms.compose`) through voice/chat.
    - Use `POST /comms/onboarding/email/reset` to surface disconnect/reset guidance.
 
 ### Current implemented endpoints
 - `GET /comms/onboarding/email`
+- `POST /comms/onboarding/email/bootstrap`
 - `POST /comms/onboarding/email/verify`
 - `POST /comms/onboarding/email/reset`
 - `GET /comms/onboarding/email/oauth`

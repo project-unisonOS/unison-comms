@@ -190,20 +190,72 @@ class InMemoryEmailAdapter:
         return {"status": "sent", "message_id": msg_id, "thread_id": msg_id, "tags": tags}
 
 
+def _gmail_store_path() -> Path:
+    return Path(os.getenv("COMMS_GMAIL_STORE_PATH", "/tmp/unison-comms-gmail.json"))
+
+
+def _gmail_store_key() -> Optional[bytes]:
+    env_key = os.getenv("COMMS_GMAIL_KEY")
+    if env_key:
+        return _load_key(env_key)
+    try:
+        from cryptography.fernet import Fernet
+
+        return Fernet.generate_key()
+    except Exception:
+        return None
+
+
+def _load_gmail_bootstrap() -> Dict[str, Any]:
+    key = _gmail_store_key()
+    if not key:
+        return {}
+    store_path = _gmail_store_path()
+    try:
+        if store_path.exists():
+            return _decrypt_blob(store_path.read_text(), key) or {}
+    except Exception:
+        return {}
+    return {}
+
+
+def _persist_gmail_bootstrap(data: Dict[str, Any]) -> bool:
+    key = _gmail_store_key()
+    if not key:
+        return False
+    store_path = _gmail_store_path()
+    try:
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_text(_encrypt_blob(data, key))
+        return True
+    except Exception:
+        return False
+
+
+def _gmail_credentials() -> Dict[str, Optional[str]]:
+    stored = _load_gmail_bootstrap()
+    return {
+        "username": os.getenv("GMAIL_USERNAME") or stored.get("username"),
+        "app_password": os.getenv("GMAIL_APP_PASSWORD") or stored.get("app_password"),
+        "imap_host": os.getenv("GMAIL_IMAP_HOST") or stored.get("imap_host") or "imap.gmail.com",
+        "smtp_host": os.getenv("GMAIL_SMTP_HOST") or stored.get("smtp_host") or "smtp.gmail.com",
+        "source": "env" if os.getenv("GMAIL_USERNAME") or os.getenv("GMAIL_APP_PASSWORD") else ("bootstrap_store" if stored else None),
+    }
+
+
 class GmailAdapter:
     """
     Minimal Gmail adapter using IMAP + SMTP with app passwords.
 
-    Assumes edge-only secrets set via env:
-    - GMAIL_USERNAME (the mailbox/user)
-    - GMAIL_APP_PASSWORD (app password generated after enabling 2FA)
+    Assumes edge-only secrets from env or the local encrypted bootstrap store.
     """
 
     def __init__(self):
-        self.username = os.getenv("GMAIL_USERNAME")
-        self.app_password = os.getenv("GMAIL_APP_PASSWORD")
-        self.imap_host = os.getenv("GMAIL_IMAP_HOST", "imap.gmail.com")
-        self.smtp_host = os.getenv("GMAIL_SMTP_HOST", "smtp.gmail.com")
+        creds = _gmail_credentials()
+        self.username = creds.get("username")
+        self.app_password = creds.get("app_password")
+        self.imap_host = creds.get("imap_host") or "imap.gmail.com"
+        self.smtp_host = creds.get("smtp_host") or "smtp.gmail.com"
         self._thread_recipients: Dict[str, List[str]] = {}
         if not self.username or not self.app_password:
             raise RuntimeError("Gmail credentials not configured")
@@ -446,17 +498,19 @@ def _gmail_readiness() -> Dict[str, Any]:
                 "next_action": "set COMMS_EMAIL_PROVIDER=gmail to begin Gmail onboarding",
             },
         }
-    username = os.getenv("GMAIL_USERNAME")
-    app_password = os.getenv("GMAIL_APP_PASSWORD")
+    creds = _gmail_credentials()
+    username = creds.get("username")
+    app_password = creds.get("app_password")
     draft_only = os.getenv("COMMS_GMAIL_DRAFT_ONLY", "true").lower() in {"1", "true", "yes", "on"}
     if not username and not app_password:
         return {
             "provider": "gmail",
             "ready": False,
             "state": "not_configured",
+            "credential_source": creds.get("source"),
             "onboarding": {
                 "status": "needs_account",
-                "next_action": "set GMAIL_USERNAME and GMAIL_APP_PASSWORD",
+                "next_action": "set GMAIL_USERNAME and GMAIL_APP_PASSWORD or call /comms/onboarding/email/bootstrap",
             },
         }
     if username and not app_password:
@@ -465,9 +519,10 @@ def _gmail_readiness() -> Dict[str, Any]:
             "ready": False,
             "state": "missing_secret",
             "username": username,
+            "credential_source": creds.get("source"),
             "onboarding": {
                 "status": "needs_app_password",
-                "next_action": "set GMAIL_APP_PASSWORD for the configured GMAIL_USERNAME",
+                "next_action": "set GMAIL_APP_PASSWORD for the configured GMAIL_USERNAME or call /comms/onboarding/email/bootstrap",
             },
         }
     return {
@@ -475,6 +530,7 @@ def _gmail_readiness() -> Dict[str, Any]:
         "ready": True,
         "state": "configured",
         "username": username,
+        "credential_source": creds.get("source"),
         "draft_only": draft_only,
         "onboarding": {
             "status": "ready",
@@ -714,8 +770,43 @@ def comms_email_onboarding() -> Dict[str, Any]:
         "provider": email_state.get("provider"),
         "ready": email_state.get("ready"),
         "state": email_state.get("state"),
+        "credential_source": email_state.get("credential_source"),
         "onboarding": email_state.get("onboarding") or {},
         "draft_only": email_state.get("draft_only", False),
+    }
+
+
+@app.post("/comms/onboarding/email/bootstrap")
+def comms_email_onboarding_bootstrap(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    provider = (body.get("provider") or "gmail").lower()
+    username = body.get("username")
+    app_password = body.get("app_password")
+    imap_host = body.get("imap_host") or "imap.gmail.com"
+    smtp_host = body.get("smtp_host") or "smtp.gmail.com"
+    if provider != "gmail":
+        raise HTTPException(status_code=400, detail="only gmail bootstrap is currently supported")
+    if not isinstance(username, str) or not username:
+        raise HTTPException(status_code=400, detail="username required")
+    if not isinstance(app_password, str) or not app_password:
+        raise HTTPException(status_code=400, detail="app_password required")
+    persisted = _persist_gmail_bootstrap(
+        {
+            "username": username,
+            "app_password": app_password,
+            "imap_host": imap_host,
+            "smtp_host": smtp_host,
+        }
+    )
+    if not persisted:
+        raise HTTPException(status_code=500, detail="failed to persist gmail bootstrap")
+    return {
+        "ok": True,
+        "provider": "gmail",
+        "status": "bootstrapped",
+        "credential_source": "bootstrap_store",
+        "username": username,
+        "imap_host": imap_host,
+        "smtp_host": smtp_host,
     }
 
 
