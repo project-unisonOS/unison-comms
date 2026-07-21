@@ -93,13 +93,13 @@ def test_email_onboarding_bootstrap_persists_local_credentials(monkeypatch, tmp_
     body = resp.json()
     assert body["ok"] is True
     assert body["status"] == "bootstrapped"
-    assert body["credential_source"] == "bootstrap_store"
+    assert body["credential_source"] == "credential_broker"
 
     ready = client.get("/comms/onboarding/email")
     ready_body = ready.json()
     assert ready_body["ready"] is True
     assert ready_body["state"] == "configured"
-    assert ready_body["credential_source"] == "bootstrap_store"
+    assert ready_body["credential_source"] == "credential_broker"
 
 
 def test_comms_compose_returns_gmail_draft_shape(monkeypatch):
@@ -171,7 +171,7 @@ def test_email_onboarding_reset_reports_reset_available(monkeypatch):
     assert body["provider"] == "gmail"
     assert body["status"] == "reset_available"
     assert body["disconnected"] is True
-    assert body["credential_source"] == "env"
+    assert body["credential_source"] == "test_environment"
     assert body["cleared_bootstrap_store"] is False
     assert "GMAIL_USERNAME" in body["cleared"]
     assert "GMAIL_APP_PASSWORD" in body["cleared"]
@@ -199,7 +199,7 @@ def test_email_onboarding_reset_clears_bootstrap_store(monkeypatch, tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["ok"] is True
-    assert body["credential_source"] == "bootstrap_store"
+    assert body["credential_source"] == "credential_broker"
     assert body["cleared_bootstrap_store"] is True
 
     ready = client.get("/comms/onboarding/email")

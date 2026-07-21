@@ -5,8 +5,10 @@ import imaplib
 import smtplib
 import email
 import json
+import hashlib
+import hmac
 from pathlib import Path
-from base64 import urlsafe_b64decode
+from base64 import urlsafe_b64decode, urlsafe_b64encode
 from email.message import EmailMessage
 from email.header import decode_header
 from email.utils import parseaddr
@@ -19,6 +21,9 @@ try:
     from unison_common import BatonMiddleware  # type: ignore
 except Exception:  # pragma: no cover
     BatonMiddleware = None  # type: ignore
+from unison_common.principal import bind_identity
+from unison_common.principal_middleware import PrincipalBindingMiddleware, get_bound_principal, get_current_principal
+from unison_common.trust import read_secret_setting
 
 app = FastAPI(title="unison-comms")
 _started = time.time()
@@ -26,8 +31,52 @@ _disable_auth = os.getenv("DISABLE_AUTH_FOR_TESTS", "false").lower() in {"1", "t
 
 if BatonMiddleware and not _disable_auth:
     app.add_middleware(BatonMiddleware)
+app.add_middleware(
+    PrincipalBindingMiddleware,
+    service_name="comms",
+    public_paths={"/health", "/readyz", "/docs", "/openapi.json"},
+    allow_test_bypass=True,
+)
 
 _unison_event_listeners: List[Any] = []
+
+
+def _principal_partitions() -> tuple[str, str, str]:
+    principal = get_current_principal()
+    if principal is not None:
+        return principal.credential_namespace, principal.data_namespace, principal.key_handle
+    if _disable_auth or os.getenv("UNISON_PRINCIPAL_BINDING_TEST_BYPASS", "false").lower() == "true":
+        return "credential:test", "data:test", "key:test"
+    raise RuntimeError("trusted principal required for personal communications state")
+
+
+def _partitioned_path(env_name: str, fallback: str, namespace: str) -> Path:
+    configured = Path(os.getenv(env_name, fallback))
+    digest = hashlib.sha256(namespace.encode("utf-8")).hexdigest()
+    return configured.parent / configured.stem / f"{digest}{configured.suffix or '.enc'}"
+
+
+def _principal_key(purpose: str, key_handle: str) -> bytes:
+    raw_root = read_secret_setting("COMMS_ROOT_KEY")
+    if not raw_root:
+        if not (_disable_auth or os.getenv("UNISON_PRINCIPAL_BINDING_TEST_BYPASS", "false").lower() == "true"):
+            raise RuntimeError("COMMS_ROOT_KEY is required")
+        raw_root = "test-only-comms-root-key-material-32-bytes"
+    digest = hmac.new(
+        raw_root.encode("utf-8"),
+        f"{key_handle}\x00{purpose}".encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    return urlsafe_b64encode(digest)
+
+
+def _bind_request_body(request: Request, body: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return bind_identity(body, get_bound_principal(request))
+    except RuntimeError:
+        if _disable_auth or os.getenv("UNISON_PRINCIPAL_BINDING_TEST_BYPASS", "false").lower() == "true":
+            return body
+        raise HTTPException(status_code=401, detail="trusted principal required")
 
 
 def _priority_tag(subject: str) -> str:
@@ -191,19 +240,13 @@ class InMemoryEmailAdapter:
 
 
 def _gmail_store_path() -> Path:
-    return Path(os.getenv("COMMS_GMAIL_STORE_PATH", "/tmp/unison-comms-gmail.json"))
+    credential_namespace, _, _ = _principal_partitions()
+    return _partitioned_path("COMMS_GMAIL_STORE_PATH", "/tmp/unison-comms-gmail.enc", credential_namespace)
 
 
 def _gmail_store_key() -> Optional[bytes]:
-    env_key = os.getenv("COMMS_GMAIL_KEY")
-    if env_key:
-        return _load_key(env_key)
-    try:
-        from cryptography.fernet import Fernet
-
-        return Fernet.generate_key()
-    except Exception:
-        return None
+    _, _, key_handle = _principal_partitions()
+    return _principal_key("comms:gmail-credentials", key_handle)
 
 
 def _load_gmail_bootstrap() -> Dict[str, Any]:
@@ -244,12 +287,15 @@ def _clear_gmail_bootstrap() -> bool:
 
 def _gmail_credentials() -> Dict[str, Optional[str]]:
     stored = _load_gmail_bootstrap()
+    allow_legacy_test_env = _disable_auth or os.getenv("UNISON_PRINCIPAL_BINDING_TEST_BYPASS", "false").lower() == "true"
+    env_username = os.getenv("GMAIL_USERNAME") if allow_legacy_test_env else None
+    env_password = os.getenv("GMAIL_APP_PASSWORD") if allow_legacy_test_env else None
     return {
-        "username": os.getenv("GMAIL_USERNAME") or stored.get("username"),
-        "app_password": os.getenv("GMAIL_APP_PASSWORD") or stored.get("app_password"),
-        "imap_host": os.getenv("GMAIL_IMAP_HOST") or stored.get("imap_host") or "imap.gmail.com",
-        "smtp_host": os.getenv("GMAIL_SMTP_HOST") or stored.get("smtp_host") or "smtp.gmail.com",
-        "source": "env" if os.getenv("GMAIL_USERNAME") or os.getenv("GMAIL_APP_PASSWORD") else ("bootstrap_store" if stored else None),
+        "username": stored.get("username") or env_username,
+        "app_password": stored.get("app_password") or env_password,
+        "imap_host": stored.get("imap_host") or "imap.gmail.com",
+        "smtp_host": stored.get("smtp_host") or "smtp.gmail.com",
+        "source": "credential_broker" if stored else ("test_environment" if env_username or env_password else None),
     }
 
 
@@ -418,20 +464,11 @@ class UnisonAdapter:
 
     def __init__(self):
         self._messages: List[Dict[str, Any]] = []
-        self._store_path = Path(os.getenv("COMMS_UNISON_STORE_PATH", "/tmp/unison-comms-unison.json"))
-        # Default to a generated key per node if none is provided, to keep store encrypted by default.
-        env_key = os.getenv("COMMS_UNISON_KEY")
-        if env_key:
-            self._store_key = _load_key(env_key)
-        else:
-            try:
-                from cryptography.fernet import Fernet
-                gen = Fernet.generate_key()
-                self._store_key = gen
-            except Exception:
-                self._store_key = None
-        if not self._store_key:
-            raise RuntimeError("Unison adapter requires COMMS_UNISON_KEY or cryptography support to encrypt the store")
+        _, data_namespace, key_handle = _principal_partitions()
+        self._store_path = _partitioned_path(
+            "COMMS_UNISON_STORE_PATH", "/tmp/unison-comms-unison.enc", data_namespace
+        )
+        self._store_key = _principal_key("comms:messages", key_handle)
         self._load_store()
 
     def _load_store(self):
@@ -605,7 +642,7 @@ def _reset_email_onboarding() -> Dict[str, Any]:
         }
     creds = _gmail_credentials()
     cleared_store = False
-    if creds.get("source") == "bootstrap_store":
+    if creds.get("source") == "credential_broker":
         cleared_store = _clear_gmail_bootstrap()
     return {
         "ok": True,
@@ -648,18 +685,22 @@ def _resolve_email_adapter():
     return InMemoryEmailAdapter()
 
 
-_email_adapter = _resolve_email_adapter()
-_unison_adapter = UnisonAdapter()
+_adapter_cache: Dict[tuple[str, str], EmailAdapter] = {}
 
 
 def _get_adapter(channel: str) -> EmailAdapter:
-    if channel == "unison":
-        return _unison_adapter
-    return _email_adapter
+    credential_namespace, data_namespace, _ = _principal_partitions()
+    namespace = data_namespace if channel == "unison" else credential_namespace
+    cache_key = (namespace, channel)
+    adapter = _adapter_cache.get(cache_key)
+    if adapter is None:
+        adapter = UnisonAdapter() if channel == "unison" else _resolve_email_adapter()
+        _adapter_cache[cache_key] = adapter
+    return adapter
 
 
 def _comms_check_impl(body: Dict[str, Any]) -> Dict[str, Any]:
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     if not isinstance(person_id, str) or not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
     channel = body.get("channel") or "email"
@@ -683,7 +724,7 @@ def _comms_check_impl(body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     if not isinstance(person_id, str) or not person_id:
         raise HTTPException(status_code=400, detail="person_id required")
     window = body.get("window") or "today"
@@ -723,7 +764,7 @@ def _comms_summarize_impl(body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _comms_reply_impl(body: Dict[str, Any]) -> Dict[str, Any]:
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     thread_id = body.get("thread_id")
     message_id = body.get("message_id")
     reply_body = body.get("body") or ""
@@ -743,7 +784,7 @@ def _comms_reply_impl(body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _comms_compose_impl(body: Dict[str, Any]) -> Dict[str, Any]:
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     channel = body.get("channel") or "email"
     recipients: Optional[List[str]] = body.get("recipients")
     subject = body.get("subject") or ""
@@ -770,12 +811,15 @@ def _comms_compose_impl(body: Dict[str, Any]) -> Dict[str, Any]:
 @app.get("/stream/unison")
 async def stream_unison():
     """Server-sent events stream for Unison channel messages."""
+    adapter = _get_adapter("unison")
     async def event_generator():
-        last_len = len(_unison_adapter._messages)
+        last_len = len(adapter._messages)
         while True:
-            if len(_unison_adapter._messages) > last_len:
-                new_msgs = _unison_adapter._messages[last_len:]
-                last_len = len(_unison_adapter._messages)
+            if len(adapter._messages) > last_len:
+                adapter._load_store()
+            if len(adapter._messages) > last_len:
+                new_msgs = adapter._messages[last_len:]
+                last_len = len(adapter._messages)
                 yield {"event": "unison", "data": json.dumps({"messages": new_msgs})}
             await asyncio.sleep(2)
     return EventSourceResponse(event_generator())
@@ -806,9 +850,15 @@ def health() -> Dict[str, Any]:
 
 @app.get("/readyz")
 def readyz() -> Dict[str, Any]:
-    email_state = _gmail_readiness()
-    ready = True if email_state.get("provider") != "gmail" else bool(email_state.get("ready"))
-    return {"status": "ready" if ready else "degraded", "service": "unison-comms", "email": email_state}
+    if _disable_auth or os.getenv("UNISON_PRINCIPAL_BINDING_TEST_BYPASS", "false").lower() == "true":
+        email_state = _gmail_readiness()
+        ready = True if email_state.get("provider") != "gmail" else bool(email_state.get("ready"))
+        return {"status": "ready" if ready else "degraded", "service": "unison-comms", "email": email_state}
+    return {
+        "status": "ready",
+        "service": "unison-comms",
+        "personal_configuration": "available after authentication",
+    }
 
 
 @app.get("/comms/onboarding/email")
@@ -828,7 +878,8 @@ def comms_email_onboarding() -> Dict[str, Any]:
 
 
 @app.post("/comms/onboarding/email/bootstrap")
-def comms_email_onboarding_bootstrap(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_email_onboarding_bootstrap(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    body = _bind_request_body(request, body)
     provider = (body.get("provider") or "gmail").lower()
     username = body.get("username")
     app_password = body.get("app_password")
@@ -854,7 +905,7 @@ def comms_email_onboarding_bootstrap(body: Dict[str, Any] = Body(...)) -> Dict[s
         "ok": True,
         "provider": "gmail",
         "status": "bootstrapped",
-        "credential_source": "bootstrap_store",
+        "credential_source": "credential_broker",
         "username": username,
         "imap_host": imap_host,
         "smtp_host": smtp_host,
@@ -877,39 +928,39 @@ def comms_email_onboarding_oauth() -> Dict[str, Any]:
 
 
 @app.post("/comms/check")
-def comms_check(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_check(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
     Check for new/unread communications.
     Uses the configured adapter (email/unison) and returns normalized messages + derived cards.
     """
-    return _comms_check_impl(body)
+    return _comms_check_impl(_bind_request_body(request, body))
 
 
 @app.post("/comms/summarize")
-def comms_summarize(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_summarize(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
     Summarize communications over a time window or topic.
     Stub returns a canned summary and a summary card.
     """
-    return _comms_summarize_impl(body)
+    return _comms_summarize_impl(_bind_request_body(request, body))
 
 
 @app.post("/comms/reply")
-def comms_reply(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_reply(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
     Send a reply to an existing thread/message.
     Stub validates identifiers and returns a confirmation payload.
     """
-    return _comms_reply_impl(body)
+    return _comms_reply_impl(_bind_request_body(request, body))
 
 
 @app.post("/comms/compose")
-def comms_compose(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_compose(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     """
     Compose and send a new message.
     Stub validates required fields and returns a confirmation payload.
     """
-    return _comms_compose_impl(body)
+    return _comms_compose_impl(_bind_request_body(request, body))
 
 
 def _mcp_base_url(request: Request) -> str:
@@ -939,10 +990,11 @@ def mcp_registry(request: Request) -> Dict[str, Any]:
 
 
 @app.post("/tools/{tool_name}")
-def mcp_tool_call(tool_name: str, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def mcp_tool_call(tool_name: str, request: Request, payload: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
     args = payload.get("arguments") if isinstance(payload, dict) else None
     if not isinstance(args, dict):
         args = {}
+    args = _bind_request_body(request, args)
     if tool_name == "comms.check":
         return _comms_check_impl(args)
     if tool_name == "comms.summarize":
@@ -956,18 +1008,22 @@ def mcp_tool_call(tool_name: str, payload: Dict[str, Any] = Body(...)) -> Dict[s
         # Reuse existing endpoint handlers via direct call pattern
         # (keeps response shapes identical to current HTTP surface).
         if tool_name == "comms.join_meeting":
-            return comms_join_meeting(args)  # type: ignore[arg-type]
+            return _comms_join_meeting_impl(args)
         if tool_name == "comms.prepare_meeting":
-            return comms_prepare_meeting(args)  # type: ignore[arg-type]
+            return _comms_prepare_meeting_impl(args)
         if tool_name == "comms.debrief_meeting":
-            return comms_debrief_meeting(args)  # type: ignore[arg-type]
+            return _comms_debrief_meeting_impl(args)
     raise HTTPException(status_code=404, detail=f"tool not found: {tool_name}")
 
 
 @app.post("/comms/join_meeting")
-def comms_join_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_join_meeting(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    return _comms_join_meeting_impl(_bind_request_body(request, body))
+
+
+def _comms_join_meeting_impl(body: Dict[str, Any]) -> Dict[str, Any]:
     """Stub meeting join endpoint; returns a card with join link/info."""
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     meeting_id = body.get("meeting_id") or "meeting-1"
     join_url = body.get("join_url") or "https://example.com/meeting"
     card = {
@@ -982,9 +1038,13 @@ def comms_join_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.post("/comms/prepare_meeting")
-def comms_prepare_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_prepare_meeting(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    return _comms_prepare_meeting_impl(_bind_request_body(request, body))
+
+
+def _comms_prepare_meeting_impl(body: Dict[str, Any]) -> Dict[str, Any]:
     """Stub meeting prep; returns agenda/participants cards."""
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     meeting_id = body.get("meeting_id") or "meeting-1"
     agenda = body.get("agenda") or ["Review updates", "Decide next steps"]
     card = {
@@ -999,9 +1059,13 @@ def comms_prepare_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
 
 
 @app.post("/comms/debrief_meeting")
-def comms_debrief_meeting(body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+def comms_debrief_meeting(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    return _comms_debrief_meeting_impl(_bind_request_body(request, body))
+
+
+def _comms_debrief_meeting_impl(body: Dict[str, Any]) -> Dict[str, Any]:
     """Stub meeting debrief; returns summary card."""
-    person_id = body.get("person_id") or "local-user"
+    person_id = body.get("person_id")
     meeting_id = body.get("meeting_id") or "meeting-1"
     summary = body.get("summary") or "Decisions: TBD. Follow-ups: TBD."
     card = {
