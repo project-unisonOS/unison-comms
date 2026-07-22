@@ -7,6 +7,7 @@ import email
 import json
 import hashlib
 import hmac
+import tempfile
 from pathlib import Path
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from email.message import EmailMessage
@@ -24,6 +25,7 @@ except Exception:  # pragma: no cover
 from unison_common.principal import bind_identity
 from unison_common.principal_middleware import PrincipalBindingMiddleware, get_bound_principal, get_current_principal
 from unison_common.trust import read_secret_setting
+from channel_gateway import AuthBindingClient, ChannelDenied, ChannelGateway, ProviderUnavailable
 
 app = FastAPI(title="unison-comms")
 _started = time.time()
@@ -39,6 +41,27 @@ app.add_middleware(
 )
 
 _unison_event_listeners: List[Any] = []
+_channel_gateway_instance: ChannelGateway | None = None
+
+
+def _channel_gateway() -> ChannelGateway:
+    global _channel_gateway_instance
+    if _channel_gateway_instance is None:
+        root_key = read_secret_setting("CHANNEL_GATEWAY_ROOT_KEY")
+        workload_secret = read_secret_setting("AUTH_CHANNEL_WORKLOAD_SECRET")
+        if not root_key or not workload_secret:
+            raise RuntimeError("channel gateway secrets are not configured")
+        authority = AuthBindingClient(
+            os.getenv("AUTH_URL", "http://auth:8088"),
+            os.getenv("AUTH_CHANNEL_WORKLOAD_ID", "unison-comms-channel-gateway"),
+            workload_secret,
+        )
+        _channel_gateway_instance = ChannelGateway(
+            os.getenv("CHANNEL_GATEWAY_DB", "/data/comms/channel-gateway.db"),
+            root_key,
+            authority,
+        )
+    return _channel_gateway_instance
 
 
 def _principal_partitions() -> tuple[str, str, str]:
@@ -241,7 +264,8 @@ class InMemoryEmailAdapter:
 
 def _gmail_store_path() -> Path:
     credential_namespace, _, _ = _principal_partitions()
-    return _partitioned_path("COMMS_GMAIL_STORE_PATH", "/tmp/unison-comms-gmail.enc", credential_namespace)
+    default_path = str(Path(tempfile.gettempdir()) / "unison-comms-gmail.enc")
+    return _partitioned_path("COMMS_GMAIL_STORE_PATH", default_path, credential_namespace)
 
 
 def _gmail_store_key() -> Optional[bytes]:
@@ -465,8 +489,9 @@ class UnisonAdapter:
     def __init__(self):
         self._messages: List[Dict[str, Any]] = []
         _, data_namespace, key_handle = _principal_partitions()
+        default_path = str(Path(tempfile.gettempdir()) / "unison-comms-unison.enc")
         self._store_path = _partitioned_path(
-            "COMMS_UNISON_STORE_PATH", "/tmp/unison-comms-unison.enc", data_namespace
+            "COMMS_UNISON_STORE_PATH", default_path, data_namespace
         )
         self._store_key = _principal_key("comms:messages", key_handle)
         self._load_store()
@@ -963,6 +988,91 @@ def comms_compose(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[st
     return _comms_compose_impl(_bind_request_body(request, body))
 
 
+def _channel_person(request: Request) -> str:
+    bound = get_bound_principal(request)
+    if bound is None or not bound.person_id:
+        raise HTTPException(status_code=401, detail="trusted person required")
+    return bound.person_id
+
+
+@app.post("/channel-gateway/accounts/telegram", status_code=201)
+def register_telegram_channel(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    try:
+        return _channel_gateway().register_telegram_account(
+            person_id=_channel_person(request),
+            provider_account_id=str(body["provider_account_id"]),
+            token=str(body["bot_token"]),
+            bot_id=str(body["bot_id"]),
+        )
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="provider account, bot ID, and token are required") from exc
+    except (ChannelDenied, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/channel-gateway/poll")
+def poll_telegram_channel(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    account_id = str(body.get("provider_account_id", ""))
+    try:
+        gateway = _channel_gateway()
+        if gateway.account_owner(account_id) != _channel_person(request):
+            raise ChannelDenied("provider account is unavailable")
+        results = gateway.poll(account_id)
+        return {
+            "status": "connected",
+            "results": [
+                {
+                    "status": result.status,
+                    "update_id": result.update_id,
+                    "envelope": result.envelope.model_dump(mode="json") if result.envelope else None,
+                    "outcome": result.outcome.model_dump(mode="json") if result.outcome else None,
+                }
+                for result in results
+            ],
+        }
+    except ChannelDenied as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ProviderUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/channel-gateway/drafts", status_code=201)
+def create_channel_draft(request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    try:
+        return _channel_gateway().create_outbound_draft(
+            person_id=_channel_person(request),
+            provider_account_id=str(body["provider_account_id"]),
+            chat_id=str(body["chat_id"]),
+            text=str(body["text"]),
+            purpose=str(body.get("purpose", "assistant-reply")),
+        )
+    except (KeyError, ChannelDenied) as exc:
+        raise HTTPException(status_code=404, detail="draft is unavailable") from exc
+
+
+@app.post("/channel-gateway/drafts/{draft_id}/confirm")
+def confirm_channel_draft(draft_id: str, request: Request, body: Dict[str, Any] = Body(...)) -> Dict[str, Any]:
+    principal = get_bound_principal(request)
+    try:
+        return _channel_gateway().confirm_outbound_draft(
+            person_id=_channel_person(request),
+            draft_id=draft_id,
+            assurance=getattr(getattr(principal, "assurance", None), "value", "low"),
+            confirmed=body.get("confirmed") is True,
+        )
+    except ChannelDenied as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@app.delete("/channel-gateway/accounts/{provider_account_id}")
+def revoke_telegram_channel(provider_account_id: str, request: Request) -> Dict[str, Any]:
+    if not _channel_gateway().revoke_account(
+        person_id=_channel_person(request), provider_account_id=provider_account_id
+    ):
+        raise HTTPException(status_code=404, detail="provider account is unavailable")
+    return {"status": "revoked", "provider_account_id": provider_account_id}
+
+
 def _mcp_base_url(request: Request) -> str:
     env = os.getenv("COMMS_PUBLIC_BASE_URL")
     if env and isinstance(env, str) and env.strip():
@@ -1082,4 +1192,4 @@ def _comms_debrief_meeting_impl(body: Dict[str, Any]) -> Dict[str, Any]:
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="127.0.0.1", port=8080)
