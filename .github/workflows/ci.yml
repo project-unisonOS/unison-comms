@@ -23,6 +23,7 @@ jobs:
           pip install pytest bandit==1.7.9
       - name: Test
         env:
+          PYTHONPATH: src
           OTEL_SDK_DISABLED: "true"
           DISABLE_AUTH_FOR_TESTS: "true"
           UNISON_PRINCIPAL_BINDING_TEST_BYPASS: "true"

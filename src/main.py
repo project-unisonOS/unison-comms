@@ -7,6 +7,7 @@ import email
 import json
 import hashlib
 import hmac
+import tempfile
 from pathlib import Path
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from email.message import EmailMessage
@@ -263,7 +264,8 @@ class InMemoryEmailAdapter:
 
 def _gmail_store_path() -> Path:
     credential_namespace, _, _ = _principal_partitions()
-    return _partitioned_path("COMMS_GMAIL_STORE_PATH", "/tmp/unison-comms-gmail.enc", credential_namespace)
+    default_path = str(Path(tempfile.gettempdir()) / "unison-comms-gmail.enc")
+    return _partitioned_path("COMMS_GMAIL_STORE_PATH", default_path, credential_namespace)
 
 
 def _gmail_store_key() -> Optional[bytes]:
@@ -487,8 +489,9 @@ class UnisonAdapter:
     def __init__(self):
         self._messages: List[Dict[str, Any]] = []
         _, data_namespace, key_handle = _principal_partitions()
+        default_path = str(Path(tempfile.gettempdir()) / "unison-comms-unison.enc")
         self._store_path = _partitioned_path(
-            "COMMS_UNISON_STORE_PATH", "/tmp/unison-comms-unison.enc", data_namespace
+            "COMMS_UNISON_STORE_PATH", default_path, data_namespace
         )
         self._store_key = _principal_key("comms:messages", key_handle)
         self._load_store()
@@ -1189,4 +1192,4 @@ def _comms_debrief_meeting_impl(body: Dict[str, Any]) -> Dict[str, Any]:
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(app, host="127.0.0.1", port=8080)

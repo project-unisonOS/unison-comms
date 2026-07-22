@@ -21,7 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=wheels /wheels /wheels
-RUN pip install --no-cache-dir --no-index /wheels/*.whl && rm -rf /wheels
+RUN pip install --no-cache-dir --no-index /wheels/*.whl \
+    && pip uninstall -y pip setuptools wheel \
+    && rm -rf /wheels
 
 COPY ${REPO_PATH}/src ./src
 

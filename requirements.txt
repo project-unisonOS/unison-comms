@@ -1,6 +1,6 @@
-fastapi==0.115.0
+fastapi==0.139.2
 uvicorn[standard]==0.30.6
 httpx==0.27.2
-cryptography==46.0.3
-sse-starlette==1.6.5
+cryptography==49.0.0
+sse-starlette==3.4.6
 unison-common @ git+https://github.com/project-unisonOS/unison-common.git@eef1a7353b2c795233daf0db6079b867ff2d98ba
