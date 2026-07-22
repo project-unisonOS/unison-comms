@@ -1,17 +1,57 @@
 from __future__ import annotations
 
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
 
-AUTH_SRC = Path(__file__).resolve().parents[2] / "unison-auth" / "src"
-if AUTH_SRC.exists():
-    sys.path.insert(0, str(AUTH_SRC))
-
 from channel_gateway import ChannelDenied, ChannelGateway, FakeTelegramProvider, ProviderUnavailable
-from identity_store import IdentityConflict, IdentityNotFound, IdentityStore
+
+
+class FakeBindingAuthority:
+    def __init__(self):
+        self.challenges = {}
+        self.bindings = {}
+
+    def create_pairing(self, *, person_id, provider_account_id, assurance):
+        if assurance not in {"high", "passkey", "hardware"}:
+            raise RuntimeError("strong local authentication required")
+        code = f"{len(self.challenges) + 1:06d}"
+        self.challenges[code] = {"person_id": person_id, "provider_account_id": provider_account_id}
+        return code
+
+    def complete_channel_pairing_by_code(self, *, pairing_code, provider, provider_account_id, external_subject):
+        challenge = self.challenges.pop(pairing_code, None)
+        if not challenge or challenge["provider_account_id"] != provider_account_id:
+            raise RuntimeError("pairing is unavailable")
+        key = (provider, provider_account_id, external_subject)
+        if key in self.bindings:
+            raise RuntimeError("pairing is unavailable")
+        binding = {
+            "channel_identity_id": f"channel-{pairing_code}",
+            "person_id": challenge["person_id"],
+            "assistant_instance_id": f"assistant-{challenge['person_id']}",
+        }
+        self.bindings[key] = binding
+        return binding
+
+    def resolve_channel_binding(self, *, provider, provider_account_id, external_subject):
+        return self.bindings.get((provider, provider_account_id, external_subject))
+
+    def revoke_paired_channel(self, *, channel_identity_id, person_id):
+        for key, binding in list(self.bindings.items()):
+            if binding["channel_identity_id"] == channel_identity_id and binding["person_id"] == person_id:
+                del self.bindings[key]
+                return True
+        return False
+
+    def revoke_provider_account_bindings(self, *, person_id, provider, provider_account_id):
+        keys = [
+            key for key, value in self.bindings.items()
+            if key[:2] == (provider, provider_account_id) and value["person_id"] == person_id
+        ]
+        for key in keys:
+            del self.bindings[key]
+        return len(keys)
 
 
 def telegram_update(update_id: int, sender: int, now: float, text: str, *, chat_type: str = "private"):
@@ -29,14 +69,8 @@ def telegram_update(update_id: int, sender: int, now: float, text: str, *, chat_
 @pytest.fixture()
 def system(tmp_path):
     clock = [1_800_000_000.0]
-    identity = IdentityStore(str(tmp_path / "identity.db"))
-    person = identity.bootstrap_first_person(
-        confirmed=True,
-        login_handle="alex",
-        display_name="Alex",
-        household_name="Home",
-        password_hash="hash",
-    )
+    identity = FakeBindingAuthority()
+    person = {"person_id": "person-alex", "household_id": "household-home"}
     provider = FakeTelegramProvider()
     gateway = ChannelGateway(
         str(tmp_path / "channels.db"),
@@ -55,11 +89,10 @@ def system(tmp_path):
 
 def pair(system, sender=101):
     clock, identity, person, provider, gateway, account_id, _ = system
-    code, _challenge = identity.create_channel_pairing(
+    code = identity.create_pairing(
         person_id=person["person_id"],
-        provider="telegram",
         provider_account_id=account_id,
-        local_assurance="passkey",
+        assurance="passkey",
     )
     provider.updates.append(telegram_update(1, sender, clock[0], f"/pair {code}"))
     assert gateway.poll(account_id)[0].status == "paired"
@@ -69,12 +102,7 @@ def pair(system, sender=101):
 
 def test_two_people_are_independent_and_credentials_are_encrypted(system):
     clock, identity, first, provider, gateway, first_account, tmp_path = system
-    token, invitation = identity.create_invitation(
-        invited_by_person_id=first["person_id"], household_id=first["household_id"]
-    )
-    second = identity.accept_invitation(
-        invitation_token=token, login_handle="sam", display_name="Sam", password_hash="hash2"
-    )
+    second = {"person_id": "person-sam"}
     gateway.register_telegram_account(
         person_id=second["person_id"], provider_account_id="bot-sam", token="secret-token-sam", bot_id="bot-2"
     )
@@ -89,31 +117,24 @@ def test_two_people_are_independent_and_credentials_are_encrypted(system):
 
 def test_pairing_requires_local_step_up_is_one_use_and_blocks_reassignment(system):
     clock, identity, person, provider, gateway, account_id, _ = system
-    with pytest.raises(IdentityConflict):
-        identity.create_channel_pairing(
-            person_id=person["person_id"], provider="telegram", provider_account_id=account_id, local_assurance="low"
+    with pytest.raises(RuntimeError):
+        identity.create_pairing(
+            person_id=person["person_id"], provider_account_id=account_id, assurance="low"
         )
     sender = pair(system)
     binding = identity.resolve_channel_binding(
         provider="telegram", provider_account_id=account_id, external_subject=str(sender)
     )
     assert binding and binding["person_id"] == person["person_id"]
-    with pytest.raises(IdentityNotFound):
+    with pytest.raises(RuntimeError):
         identity.complete_channel_pairing_by_code(
             pairing_code="000000", provider="telegram", provider_account_id=account_id,
             external_subject=str(sender)
         )
-    invitation_token, _ = identity.create_invitation(
-        invited_by_person_id=person["person_id"], household_id=person["household_id"]
+    second_code = identity.create_pairing(
+        person_id="person-sam", provider_account_id=account_id, assurance="high"
     )
-    second = identity.accept_invitation(
-        invitation_token=invitation_token, login_handle="sam2", display_name="Sam", password_hash="hash2"
-    )
-    second_code, _ = identity.create_channel_pairing(
-        person_id=second["person_id"], provider="telegram", provider_account_id=account_id,
-        local_assurance="high"
-    )
-    with pytest.raises(IdentityConflict):
+    with pytest.raises(RuntimeError):
         identity.complete_channel_pairing_by_code(
             pairing_code=second_code, provider="telegram", provider_account_id=account_id,
             external_subject=str(sender)
