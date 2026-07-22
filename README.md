@@ -5,6 +5,8 @@ Communications service for UnisonOS. Provides intent-centric comms endpoints (`c
 ## Status
 Active bounded service slice. Core comms endpoints remain simple, and Gmail now has a real onboarding/readiness contract surface with draft-first compose behavior.
 
+Phase 5 adds the Telegram Channel Gateway without removing the Gmail adapter. See [the Telegram channel guide](docs/telegram-channel.md) for pairing, disclosure, privacy, recovery, deployment, and credential-free conformance details.
+
 ## Run
 ```bash
 python3 -m venv .venv && . .venv/bin/activate
